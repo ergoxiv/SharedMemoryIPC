@@ -22,16 +22,20 @@ bld/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
+bin/
+obj/
+
+# Publish artifacts
+publish/
+deploy/
 
 # .NET Core
 project.lock.json
 project.fragment.lock.json
 artifacts/
 
-# ASP.NET Scaffolding
-ScaffoldingReadMe.txt
-
 # NuGet Packages
+packages/
 *.nupkg
 # NuGet Symbol Packages
 *.snupkg
@@ -40,6 +44,19 @@ ScaffoldingReadMe.txt
 ~$*
 *~
 CodeCoverage/
+\.vs/
+\.idea/
+*.user
+*.tlog
+*.iobj
+*.ipdb
+*.filters
+*.pdb
+*.log
+*.obj
+*.idb
+*.recipe
+*.ilk
 
 # MSBuild Binary and Structured Log
 *.binlog
