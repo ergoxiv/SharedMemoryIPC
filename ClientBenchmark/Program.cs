@@ -13,11 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+using SharedMemoryIPC;
+
 namespace ClientBenchmark;
 
 internal class Program
 {
-	static void Main(string[] args)
+	static void Main()
 	{
 		Console.WriteLine("Client Benchmark Starting...");
 		Benchmark.RunClient();

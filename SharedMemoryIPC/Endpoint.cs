@@ -16,6 +16,7 @@
 using System;
 using System.IO;
 using System.IO.MemoryMappedFiles;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -34,33 +35,26 @@ public class Endpoint
 	{
 	}
 
-	public ulong Write<T>(uint id, T payload, int timeoutMs = 1000)
+	public int Write<T>(uint id, T payload, int timeoutMs = 1000)
 		where T : unmanaged
 	{
 		PayloadType type = GetPayloadType<T>();
-		ulong payloadSize;
-		byte[] payloadBytes;
+		int payloadSize = Marshal.SizeOf<T>();
 
-		if (type == PayloadType.Blob)
-		{
-			payloadSize = (ulong)Marshal.SizeOf<T>();
-			payloadBytes = MarshalToByteArray(payload, typeof(T));
-		}
-		else
-		{
-			payloadSize = (ulong)Marshal.SizeOf<T>();
-			payloadBytes = new byte[payloadSize];
-			MemoryMarshal.Write(payloadBytes, in payload);
-		}
+		Span<byte> payloadSpan = payloadSize <= 256
+			? stackalloc byte[payloadSize]
+			: new byte[payloadSize];
+
+		MemoryMarshal.Write(payloadSpan, in payload);
 
 		var header = new MessageHeader
 		{
 			Id = id,
 			Type = type,
-			Length = payloadSize,
+			Length = (ulong)payloadSize,
 		};
 
-		if (!this.Write(header, payloadBytes, timeoutMs))
+		if (!this.Write(header, payloadSpan, timeoutMs))
 			return 0;
 
 		return payloadSize;
@@ -73,24 +67,24 @@ public class Endpoint
 		payload = default;
 
 		PayloadType expectedType = GetPayloadType<T>();
-		ulong expectedSize = (ulong)Marshal.SizeOf<T>();
+		int expectedSize = Marshal.SizeOf<T>();
 
-		if (!this.Read(out MessageHeader header, out byte[] payloadBytes, timeoutMs))
+		if (!this.Read(out MessageHeader header, out ReadOnlySpan<byte> payloadSpan, timeoutMs))
 			return false;
 
 		if (header.Type != expectedType)
 			throw new InvalidOperationException($"Payload type mismatch. Expected {expectedType}, but got {header.Type}.");
 
-		if (header.Length != expectedSize)
+		if (header.Length != (ulong)expectedSize)
 			throw new InvalidOperationException($"Payload size mismatch. Expected {expectedSize} bytes, but got {header.Length} bytes.");
 
 		id = header.Id;
-		var payloadSpan = new ReadOnlySpan<byte>(payloadBytes);
 		payload = MemoryMarshal.Read<T>(payloadSpan);
 
 		return true;
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static PayloadType GetPayloadType<T>()
 	{
 		Type t = typeof(T);
@@ -113,29 +107,6 @@ public class Endpoint
 			_ => PayloadType.Blob,
 		};
 	}
-
-	// Yoinked from Anamnesis' MemoryService
-	private static byte[] MarshalToByteArray(object value, Type type)
-	{
-		int size = Marshal.SizeOf(type);
-		byte[] buffer = new byte[size];
-		IntPtr mem = Marshal.AllocHGlobal(size);
-		try
-		{
-			Marshal.StructureToPtr(value, mem, false);
-			Marshal.Copy(mem, buffer, 0, size);
-		}
-		catch (Exception ex)
-		{
-			throw new Exception($"Failed to marshal type: {type} to memory", ex);
-		}
-		finally
-		{
-			Marshal.FreeHGlobal(mem);
-		}
-
-		return buffer;
-	}
 }
 
 // TODO: Endpoint class should have a helper that constructs the message header + payload in a single contiguous memory block, so users don't have to do this manually every time.
@@ -143,8 +114,11 @@ public class Endpoint
 public unsafe class Endpoint<TMessageHeader> : IDisposable
 	where TMessageHeader : unmanaged, IMessageHeader
 {
-	private bool desiredShmOwner;
-	private ulong sharedMemorySize; // TODO: Avoid calculating this multiple times (in the endpoint and in the ring buffer)
+	const int SpinWaitIterations = 100;
+	const int SpinWaitDelay = 10;
+
+	private readonly bool desiredShmOwner;
+	private ulong sharedMemorySize;
 	private uint blockCount;
 	private ulong blockSize;
 	private bool disposedValue;
@@ -226,9 +200,10 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
 
-		while (true)
+		OpStatus status;
+		for (; ; )
 		{
-			OpStatus status = this.ringBuffer!.Write(header, payload.ToArray());
+			status = this.ringBuffer!.Write(header, payload.ToArray());
 
 			if (status == OpStatus.Ok)
 			{
@@ -236,33 +211,51 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				return true;
 			}
 
-			if (!this.canWriteEvent!.WaitOne(timeoutMs))
+			for (int i = 0; i < SpinWaitIterations; i++)
 			{
-				Console.WriteLine("Write timed out");
-				return false;
+				status = this.ringBuffer!.Write(header, payload.ToArray());
+				if (status == OpStatus.Ok)
+				{
+					this.canReadEvent!.Set();
+					return true;
+				}
+				Thread.SpinWait(SpinWaitDelay);
 			}
+
+			if (!this.canWriteEvent!.WaitOne(timeoutMs))
+				return false;
 		}
 	}
 
-	public bool Read(out TMessageHeader header, out byte[] payload, int timeoutMs = 1000)
+	public bool Read(out TMessageHeader header, out ReadOnlySpan<byte> payload, int timeoutMs = 1000)
 	{
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
 
-		while (true)
+		OpStatus status;
+		for (; ; )
 		{
-			OpStatus status = this.ringBuffer!.Read(out header, out payload);
+			status = this.ringBuffer!.Read(out header, out payload);
+
 			if (status == OpStatus.Ok)
 			{
 				this.canWriteEvent!.Set();
 				return true;
 			}
 
-			if (!this.canReadEvent!.WaitOne(timeoutMs))
+			for (int i = 0; i < SpinWaitIterations; i++)
 			{
-				Console.WriteLine("Read timed out");
-				return false;
+				status = this.ringBuffer!.Read(out header, out payload);
+				if (status == OpStatus.Ok)
+				{
+					this.canWriteEvent!.Set();
+					return true;
+				}
+				Thread.SpinWait(SpinWaitDelay);
 			}
+
+			if (!this.canReadEvent!.WaitOne(timeoutMs))
+				return false;
 		}
 	}
 
@@ -302,7 +295,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 					const int maxWaitMs = 60000;
 					const int pollIntervalMs = 50;
 					int waited = 0;
-					while (true)
+					for (; ; )
 					{
 						try
 						{

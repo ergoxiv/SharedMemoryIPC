@@ -102,17 +102,28 @@ public enum RingBufferFlags : uint
 	Shutdown = 1 << 0, // Indicates that the primary endpoint has shut down and no more messages will be processed
 }
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public unsafe struct RingBufferHeader // 64 bytes
+[StructLayout(LayoutKind.Explicit, Size = 192, Pack = 8)]
+public unsafe struct RingBufferHeader // 192 bytes
 {
-	public ulong SharedMemorySize;     // Total size of the shared memory segment
-	public uint BlockCount;            // The number of blocks in the ring buffer
-	private fixed byte _reserved1[4];  // Padding to make next field 8-byte aligned
-	public ulong BlockSize;            // The size of each block in bytes
-	public ulong ProducerHead;         // Offset to the head of the producer
-	public ulong ConsumerHead;         // Offset to the head of the consumer
-	public RingBufferFlags Flags;      // Bit flags for various states (e.g., shutdown)
-	private fixed byte _reserved2[20]; // Padding to make the struct 64 bytes
+	// Cache line 0: Metadata
+	[FieldOffset(0)]
+	public ulong SharedMemorySize; // Total size of the shared memory segment
+	[FieldOffset(8)]
+	public uint BlockCount;        // The number of blocks in the ring buffer
+
+	[FieldOffset(16)]
+	public ulong BlockSize;        // The size of each block in bytes
+
+	[FieldOffset(24)]
+	public RingBufferFlags Flags;  // Bit flags for various states (e.g., shutdown)
+
+	// Cache line 1: ProducerHead
+	[FieldOffset(64)]
+	public ulong ProducerHead;     // Offset to the head of the producer
+
+	// Cache line 2: ConsumerHead
+	[FieldOffset(128)]
+	public ulong ConsumerHead;     // Offset to the head of the consumer
 }
 
 // Each control variable consists of 2 parts:
@@ -120,7 +131,7 @@ public unsafe struct RingBufferHeader // 64 bytes
 // (1b) Offset:  The byte offset within a block.
 // (2)  Version: Distinguishes between cycles through the ring buffer.
 [StructLayout(LayoutKind.Explicit, Size = 256, Pack = 64)]
-public unsafe struct BlockHeader // 32 bytes
+public unsafe struct BlockHeader // 256 bytes
 {
 	[FieldOffset(0)]
 	public ulong Allocated;
@@ -277,7 +288,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	// with the ring buffer memory and updating the control variables.
 	public OpStatus Write(TMessageHeader msgHeader, byte[]? payload = null)
 	{
-		while (true)
+		for (; ; )
 		{
 			ulong pHead = Interlocked.Read(ref this.rbHeaderPtr->ProducerHead);
 			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
@@ -309,9 +320,9 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		}
 	}
 
-	public OpStatus Read(out TMessageHeader msgHeader, out byte[] payload)
+	public OpStatus Read(out TMessageHeader msgHeader, out ReadOnlySpan<byte> payload)
 	{
-		while (true)
+		for (; ; )
 		{
 			ulong cHead = Interlocked.Read(ref this.rbHeaderPtr->ConsumerHead);
 			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
@@ -323,12 +334,9 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 			switch (state)
 			{
 				case State.Reserved:
-					Tuple<TMessageHeader, byte[]>? result = this.ConsumeEntry(ref entry);
-					if (result == null)
-						continue;
-
-					msgHeader = result.Item1;
-					payload = result.Item2;
+					this.ConsumeEntry(ref entry);
+					msgHeader = entry.MsgHeader;
+					payload = entry.MsgPayload ?? [];
 					return OpStatus.Ok;
 				case State.NoEntry:
 					msgHeader = default;
@@ -378,13 +386,12 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		this.disposedValue = true;
 	}
 
-	private struct EntryDesc(BlockHeader* blkHeader, byte* blkPayload, TMessageHeader? msgHeader = null, byte[]? msgPayload = null)
+	private ref struct EntryDesc(BlockHeader* blkHeader, byte* blkPayload, TMessageHeader msgHeader = default, byte[]? msgPayload = null)
 	{
-		public TMessageHeader? MsgHeader = msgHeader;
+		public TMessageHeader MsgHeader = msgHeader;
 		public byte[]? MsgPayload = msgPayload;
 		public BlockHeader* BlockHeader = blkHeader;
 		public byte* BlockPayload = blkPayload;
-		public ulong PayloadLength;
 		public ulong Offset = 0;
 	}
 
@@ -405,13 +412,13 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private ulong GetBlockVsn(ulong hVal) => (hVal >> this.idxBits) & this.vsnMask;
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	private ulong PkgHead(ulong idx, ulong vsn) => (idx & this.idxMask) | ((vsn << this.idxBits) & (this.vsnMask << this.idxBits));
-
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private ulong GetCursorOff(ulong cVal) => cVal & this.offMask;
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private ulong GetCursorVsn(ulong cVal) => (cVal >> this.offBits) & this.vsnMask;
+
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	private ulong PkgHead(ulong idx, ulong vsn) => (idx & this.idxMask) | ((vsn << this.idxBits) & (this.vsnMask << this.idxBits));
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private ulong PkgCursor(ulong off, ulong vsn) => (off & this.offMask) | ((vsn << this.offBits) & (this.vsnMask << this.offBits));
@@ -474,34 +481,36 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		Unsafe.InitBlockUnaligned(this.blkPayloadStartPtr, 0, (uint)this.rbHeaderPtr->BlockSize * this.rbHeaderPtr->BlockCount);
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private State AllocateEntry(ref EntryDesc entry)
 	{
-		ulong entrySize = MessageHeaderSize + (entry.MsgHeader?.Length ?? 0);
 		ulong allocated = Interlocked.Read(ref entry.BlockHeader->Allocated);
-		ulong offset = this.GetCursorOff(allocated);
+		ulong entrySize = MessageHeaderSize + entry.MsgHeader.Length;
+		ulong allocatedOff = this.GetCursorOff(allocated);
+		ulong endCursor = this.PkgCursor(this.blockSize, this.GetCursorVsn(allocated));
 
-		if (offset + MessageHeaderSize > this.blockSize)
+		if (allocatedOff + MessageHeaderSize > this.blockSize)
 		{
 			// Not enough space for a dummy message header, only move the producer cursors.
-			Interlocked.Exchange(ref entry.BlockHeader->Allocated, this.PkgCursor(this.blockSize, this.GetCursorVsn(allocated)));
-			Interlocked.Exchange(ref entry.BlockHeader->Committed, this.PkgCursor(this.blockSize, this.GetCursorVsn(allocated)));
+			Interlocked.Exchange(ref entry.BlockHeader->Allocated, endCursor);
+			Interlocked.Exchange(ref entry.BlockHeader->Committed, endCursor);
 			return State.BlockDone;
 		}
 
-		if (offset + entrySize > this.blockSize)
+		if (allocatedOff + entrySize > this.blockSize)
 		{
 			// Not enough space for the entry. Move the producer cursors and create a dummy entry
 			// to inform the consumers to proceed to the next block.
-			Interlocked.Exchange(ref entry.BlockHeader->Allocated, this.PkgCursor(this.blockSize, this.GetCursorVsn(allocated)));
+			Interlocked.Exchange(ref entry.BlockHeader->Allocated, endCursor);
 
 			// Create a dummy entry
-			*(TMessageHeader*)(entry.BlockPayload + offset) = new TMessageHeader
+			*(TMessageHeader*)(entry.BlockPayload + allocatedOff) = new TMessageHeader
 			{
 				Type = PayloadType.Invalid,
-				Length = this.blockSize - offset - MessageHeaderSize,
+				Length = this.blockSize - allocatedOff - MessageHeaderSize,
 			};
 
-			Interlocked.Exchange(ref entry.BlockHeader->Committed, this.PkgCursor(this.blockSize, this.GetCursorVsn(allocated)));
+			Interlocked.Exchange(ref entry.BlockHeader->Committed, endCursor);
 			return State.BlockDone;
 		}
 
@@ -514,56 +523,66 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		return State.Allocated;
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private void CommitEntry(ref EntryDesc entry)
 	{
 		// Write the message header
-		*(TMessageHeader*)(entry.BlockPayload + entry.Offset) = (TMessageHeader)entry.MsgHeader!;
+		*(TMessageHeader*)(entry.BlockPayload + entry.Offset) = entry.MsgHeader;
 
 		// Write the message payload if it exists
-		if (entry.MsgPayload != null && entry.MsgHeader != null && entry.MsgHeader?.Length > 0)
+		if (entry.MsgHeader.Length > 0 && entry.MsgPayload != null)
 		{
 			fixed (byte* src = entry.MsgPayload)
 			{
-				Buffer.MemoryCopy(src, entry.BlockPayload + entry.Offset + MessageHeaderSize, entry.MsgHeader.Value.Length, entry.MsgHeader.Value.Length);
+				Buffer.MemoryCopy(
+					src,
+					entry.BlockPayload + entry.Offset + MessageHeaderSize,
+					entry.MsgHeader.Length,
+					entry.MsgHeader.Length
+				);
 			}
 		}
 
 		// Update the committed cursor
-		ulong entrySize = MessageHeaderSize + (entry.MsgHeader?.Length ?? 0);
+		ulong entrySize = MessageHeaderSize + entry.MsgHeader.Length;
 		Interlocked.Add(ref entry.BlockHeader->Committed, entrySize);
 	}
 
 	private State AdvancePHead(ulong pHead)
 	{
 		ulong nextIdx = (this.GetBlockIdx(pHead) + 1) % this.blockCount;
-		ulong nextVsn = this.GetBlockVsn(pHead) + ((nextIdx == 0) ? 1UL : 0UL);
+		ulong pHeadVsn = this.GetBlockVsn(pHead);
+		ulong nextVsn = pHeadVsn + ((nextIdx == 0) ? 1UL : 0UL);
 		BlockHeader* nextBlkHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
 
 		// Check if the next block is available (i.e., fully consumed)
 		ulong consumed = Interlocked.Read(ref nextBlkHdrPtr->Consumed);
-		if (this.GetCursorVsn(consumed) < this.GetBlockVsn(pHead) ||
-			(this.GetCursorVsn(consumed) == this.GetBlockVsn(pHead) && this.GetCursorOff(consumed) != this.blockSize))
+		if (this.GetCursorVsn(consumed) < pHeadVsn ||
+			(this.GetCursorVsn(consumed) == pHeadVsn && this.GetCursorOff(consumed) != this.blockSize))
 		{
 			ulong reserved = Interlocked.Read(ref nextBlkHdrPtr->Reserved);
 			return this.GetCursorOff(reserved) == this.GetCursorOff(consumed) ? State.NoEntry : State.NotAvailable;
 		}
 
-		AtomicMax(ref nextBlkHdrPtr->Committed, this.PkgCursor(0, this.GetBlockVsn(pHead) + 1));
-		AtomicMax(ref nextBlkHdrPtr->Allocated, this.PkgCursor(0, this.GetBlockVsn(pHead) + 1));
+		AtomicMax(ref nextBlkHdrPtr->Committed, this.PkgCursor(0, pHeadVsn + 1));
+		AtomicMax(ref nextBlkHdrPtr->Allocated, this.PkgCursor(0, pHeadVsn + 1));
 		AtomicMax(ref this.rbHeaderPtr->ProducerHead, this.PkgHead(nextIdx, nextVsn));
 
 		return State.Success;
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private State ReserveEntry(ref EntryDesc entry)
 	{
-		while (true)
+		for (; ; )
 		{
 			ulong reserved = Interlocked.Read(ref entry.BlockHeader->Reserved);
-			if (this.GetCursorOff(reserved) + MessageHeaderSize <= this.blockSize)
+			ulong reservedOff = this.GetCursorOff(reserved);
+
+			if (reservedOff + MessageHeaderSize <= this.blockSize)
 			{
 				ulong committed = Interlocked.Read(ref entry.BlockHeader->Committed);
-				if (this.GetCursorOff(reserved) == this.GetCursorOff(committed))
+				if (reservedOff == this.GetCursorOff(committed))
 					return State.NoEntry;
 
 				if (this.GetCursorOff(committed) < this.blockSize)
@@ -574,19 +593,17 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 				}
 
 				// Try to reserve the next message entry in the block
-				ulong offset = this.GetCursorOff(reserved);
-				TMessageHeader msgHeader = *(TMessageHeader*)(entry.BlockPayload + offset);
-				ulong entrySize = MessageHeaderSize + msgHeader.Length;
+				entry.MsgHeader = *(TMessageHeader*)(entry.BlockPayload + reservedOff);
+				ulong entrySize = MessageHeaderSize + entry.MsgHeader.Length;
 
-				if (Interlocked.CompareExchange(ref entry.BlockHeader->Reserved, this.PkgCursor(offset + entrySize, this.GetCursorVsn(reserved)), reserved) == reserved)
+				if (Interlocked.CompareExchange(ref entry.BlockHeader->Reserved, this.PkgCursor(reservedOff + entrySize, this.GetCursorVsn(reserved)), reserved) == reserved)
 				{
 					// Successfully reserved space for the message header
-					entry.Offset = offset;
-					entry.PayloadLength = entry.Offset + entrySize;
+					entry.Offset = reservedOff;
 
-					if (msgHeader.Type == PayloadType.Invalid)
+					if (entry.MsgHeader.Type == PayloadType.Invalid)
 					{
-						Interlocked.Exchange(ref entry.BlockHeader->Consumed, this.PkgCursor(offset + entrySize, this.GetCursorVsn(reserved)));
+						Interlocked.Exchange(ref entry.BlockHeader->Consumed, this.PkgCursor(reservedOff + entrySize, this.GetCursorVsn(reserved)));
 						return State.BlockDone;
 					}
 
@@ -596,49 +613,48 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 					continue; // Retry if the reservation failed
 			}
 
+			Interlocked.Exchange(ref entry.BlockHeader->Reserved, this.PkgCursor(this.blockSize, this.GetCursorVsn(reserved)));
+			Interlocked.Exchange(ref entry.BlockHeader->Consumed, this.PkgCursor(this.blockSize, this.GetCursorVsn(reserved)));
 			return State.BlockDone;
 		}
 	}
 
-	private Tuple<TMessageHeader, byte[]> ConsumeEntry(ref EntryDesc entry)
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	private void ConsumeEntry(ref EntryDesc entry)
 	{
-		ulong entrySize = MessageHeaderSize + entry.PayloadLength;
+		ulong entrySize = MessageHeaderSize + entry.MsgHeader.Length;
 		Interlocked.Add(ref entry.BlockHeader->Consumed, entrySize);
 
-		TMessageHeader msgHeader = *(TMessageHeader*)(entry.BlockPayload + entry.Offset);
-		byte[] msgPayload = [];
-
-		if (msgHeader.Length > 0)
+		if (entry.MsgHeader.Length > 0)
 		{
-			msgPayload = new byte[(int)msgHeader.Length];
-			fixed (byte* dst = msgPayload)
+			entry.MsgPayload = new byte[entry.MsgHeader.Length];
+			fixed (byte* dst = entry.MsgPayload)
 			{
 				Buffer.MemoryCopy(
 					entry.BlockPayload + entry.Offset + MessageHeaderSize,
 					dst,
-					msgHeader.Length,
-					msgHeader.Length
+					entry.MsgHeader.Length,
+					entry.MsgHeader.Length
 				);
 			}
 		}
-
-		return Tuple.Create(msgHeader, msgPayload);
 	}
 
 	private bool AdvanceCHead(ulong cHead)
 	{
 		ulong nextIdx = (this.GetBlockIdx(cHead) + 1) % this.blockCount;
+		ulong cHeadVsn = this.GetBlockVsn(cHead);
 		ulong nextVsn = this.GetBlockVsn(cHead) + ((nextIdx == 0) ? 1UL : 0UL);
 		BlockHeader* nextBlkHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
 
 		ulong committed = Interlocked.Read(ref nextBlkHdrPtr->Committed);
 
 		// Only advance the consumer head if the next block is fully committed
-		if (this.GetCursorVsn(committed) != this.GetBlockVsn(cHead) + 1)
+		if (this.GetCursorVsn(committed) != cHeadVsn + 1)
 			return false;
 
-		AtomicMax(ref nextBlkHdrPtr->Consumed, this.PkgCursor(0, this.GetBlockVsn(cHead) + 1));
-		AtomicMax(ref nextBlkHdrPtr->Reserved, this.PkgCursor(0, this.GetBlockVsn(cHead) + 1));
+		AtomicMax(ref nextBlkHdrPtr->Consumed, this.PkgCursor(0, cHeadVsn + 1));
+		AtomicMax(ref nextBlkHdrPtr->Reserved, this.PkgCursor(0, cHeadVsn + 1));
 		AtomicMax(ref this.rbHeaderPtr->ConsumerHead, this.PkgHead(nextIdx, nextVsn));
 		return true;
 	}
