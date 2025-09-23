@@ -102,7 +102,7 @@ public static class Benchmark
 		}
 
 		Console.WriteLine($"Throughput: {roundTripThroughput:F2} round-trip sequences/sec");
-		Console.WriteLine($"Throughput: {messageThroughput:F2} messages/sec (both directions)");
-		Console.WriteLine($"Throughput: {mbPerSec:F2} MiB/sec (both directions)");
+		Console.WriteLine($"Throughput: {messageThroughput:F2} messages/sec");
+		Console.WriteLine($"Throughput: {mbPerSec:F2} MiB/sec");
 	}
 }
