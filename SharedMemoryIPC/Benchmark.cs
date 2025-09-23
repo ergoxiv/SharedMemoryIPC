@@ -34,7 +34,7 @@ public static class Benchmark
 	const string ShmNameS2C = "BenchmarkIPC_S2C";
 	const uint BlockCount = 16; // 128
 	const ulong BlockSize = 4096; // 8192
-	const int MessageCount = 100_000;
+	const int MessageCount = 1_000_000;
 	const int LatencySampleRate = 1000;
 	const int LatencySampleCount = MessageCount / LatencySampleRate;
 

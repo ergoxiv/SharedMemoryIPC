@@ -14,6 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 using System;
+using System.ComponentModel;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
@@ -35,7 +36,7 @@ public class Endpoint
 	{
 	}
 
-	public int Write<T>(uint id, T payload, int timeoutMs = 1000)
+	public int Write<T>(uint id, T payload, uint timeoutMs = 1000)
 		where T : unmanaged
 	{
 		PayloadType type = GetPayloadType<T>();
@@ -60,7 +61,7 @@ public class Endpoint
 		return payloadSize;
 	}
 
-	public bool Read<T>(out uint id, out T payload, int timeoutMs = 1000)
+	public bool Read<T>(out uint id, out T payload, uint timeoutMs = 1000)
 		where T : unmanaged
 	{
 		id = 0;
@@ -123,8 +124,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	private ulong blockSize;
 	private bool disposedValue;
 
-	private EventWaitHandle? canReadEvent = null;  // Signaled after a write to indicate data is available to read
-	private EventWaitHandle? canWriteEvent = null; // Signaled after a read to indicate space is available to write
+	private IntPtr canReadEvent = IntPtr.Zero;  // Signaled after a write to indicate data is available to read
+	private IntPtr canWriteEvent = IntPtr.Zero; // Signaled after a read to indicate space is available to write
 
 	private RingBuffer<TMessageHeader>? ringBuffer = null;
 	private MemoryMappedFile? mmf = null;
@@ -192,7 +193,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		this.disposedValue = true;
 	}
 
-	public bool Write(TMessageHeader header, ReadOnlySpan<byte> payload, int timeoutMs = 1000)
+	public bool Write(TMessageHeader header, ReadOnlySpan<byte> payload, uint timeoutMs = 1000)
 	{
 		if ((ulong)payload.Length > this.blockSize)
 			throw new ArgumentOutOfRangeException(nameof(payload), "Payload size exceeds block size.");
@@ -207,7 +208,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 
 			if (status == OpStatus.Ok)
 			{
-				this.canReadEvent!.Set();
+				NativeMethods.SetEvent(this.canReadEvent);
 				return true;
 			}
 
@@ -216,18 +217,18 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				status = this.ringBuffer!.Write(header, payload.ToArray());
 				if (status == OpStatus.Ok)
 				{
-					this.canReadEvent!.Set();
+					NativeMethods.SetEvent(this.canReadEvent);
 					return true;
 				}
 				Thread.SpinWait(SpinWaitDelay);
 			}
 
-			if (!this.canWriteEvent!.WaitOne(timeoutMs))
+			if (NativeMethods.WaitForSingleObject(this.canWriteEvent, timeoutMs) != WAIT_OBJECT_0)
 				return false;
 		}
 	}
 
-	public bool Read(out TMessageHeader header, out ReadOnlySpan<byte> payload, int timeoutMs = 1000)
+	public bool Read(out TMessageHeader header, out ReadOnlySpan<byte> payload, uint timeoutMs = 1000)
 	{
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
@@ -239,7 +240,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 
 			if (status == OpStatus.Ok)
 			{
-				this.canWriteEvent!.Set();
+				NativeMethods.SetEvent(this.canWriteEvent);
 				return true;
 			}
 
@@ -248,13 +249,13 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				status = this.ringBuffer!.Read(out header, out payload);
 				if (status == OpStatus.Ok)
 				{
-					this.canWriteEvent!.Set();
+					NativeMethods.SetEvent(this.canWriteEvent);
 					return true;
 				}
 				Thread.SpinWait(SpinWaitDelay);
 			}
 
-			if (!this.canReadEvent!.WaitOne(timeoutMs))
+			if (NativeMethods.WaitForSingleObject(this.canReadEvent, timeoutMs) != WAIT_OBJECT_0)
 				return false;
 		}
 	}
@@ -364,8 +365,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			}
 
 			// Create the sync events
-			this.canReadEvent = new EventWaitHandle(false, EventResetMode.AutoReset, $"{this.Name}_Ev_CanRead");
-			this.canWriteEvent = new EventWaitHandle(false, EventResetMode.AutoReset, $"{this.Name}_Ev_CanWrite");
+			this.canReadEvent = CreateOrOpenEvent($"{this.Name}_Ev_CanRead");
+			this.canWriteEvent = CreateOrOpenEvent($"{this.Name}_Ev_CanWrite");
 		}
 		catch
 		{
@@ -380,10 +381,16 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 
 	private void CloseMemoryMappedFile()
 	{
-		this.canReadEvent?.Dispose();
-		this.canReadEvent = null;
-		this.canWriteEvent?.Dispose();
-		this.canWriteEvent = null;
+		if (this.canReadEvent != IntPtr.Zero)
+		{
+			NativeMethods.CloseHandle(this.canReadEvent);
+			this.canReadEvent = IntPtr.Zero;
+		}
+		if (this.canWriteEvent != IntPtr.Zero)
+		{
+			NativeMethods.CloseHandle(this.canWriteEvent);
+			this.canWriteEvent = IntPtr.Zero;
+		}
 
 		// Dispose of the ring buffer
 		// NOTE: If the endpoint is the owner of the shared memory, ring buffer
@@ -401,4 +408,36 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		this.mmf?.Dispose();
 		this.mmf = null;
 	}
+
+	private static IntPtr CreateOrOpenEvent(string name)
+	{
+		var handle = NativeMethods.CreateEvent(IntPtr.Zero, false, false, name);
+		if (handle == IntPtr.Zero || handle == INVALID_HANDLE_VALUE)
+			throw new Win32Exception(Marshal.GetLastWin32Error(), $"Failed to create/open event '{name}'");
+		return handle;
+	}
+
+	private const uint WAIT_OBJECT_0 = 0x00000000;
+	private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
+}
+
+static partial class NativeMethods
+{
+	[LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16, EntryPoint = "CreateEventW")]
+	public static partial IntPtr CreateEvent(
+	IntPtr lpEventAttributes,
+	[MarshalAs(UnmanagedType.Bool)] bool bManualReset,
+	[MarshalAs(UnmanagedType.Bool)] bool bInitialState,
+	string lpName);
+
+	[LibraryImport("kernel32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	public static partial bool SetEvent(IntPtr hEvent);
+
+	[LibraryImport("kernel32.dll", SetLastError = true)]
+	public static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+	[LibraryImport("kernel32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	public static partial bool CloseHandle(IntPtr hObject);
 }
