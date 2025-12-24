@@ -61,6 +61,17 @@ public enum PayloadType : byte
 	UTF16String = 27,
 	Guid = 28, // 128-bit globally unique identifier
 	Blob = 30, // Arbitrary binary data; Intended for sending unmanaged structs or serialized objects
+
+	// Special types
+
+	Heartbeat = 0x77, // Heartbeat; No payload
+	Retry = 0x78,     // Retry; No payload
+	Error = 0x79,     // Error; Optional payload (e.g., error message)
+	Syn = 0x7A,       // Synchronization; Optional payload (e.g., timestamp)
+	Fin = 0x7B,       // Finish/close connection; No payload
+	Rst = 0x7C,       // Reset connection; No payload
+	Hello = 0x7D,     // Hello; No payload
+	Ack = 0x7E,       // Acknowledgment; No payload
 	NoPayload = 0x7F, // No payload; Used for signaling or notifications
 
 	// NOTE: Limit to 127 maximum allowed types.
@@ -94,6 +105,9 @@ public enum PayloadType : byte
 	UTF16StringArray = UTF16String | 0x80, // Intended for UTF-16 strings split by null terminators
 	GuidArray = Guid | 0x80,
 	BlobArray = Blob | 0x80,
+
+	Bye = 0xFD,     // Goodbye; No payload
+	NAck = 0xFE,    // Negative acknowledgment; No payload
 }
 
 public enum RingBufferFlags : uint
