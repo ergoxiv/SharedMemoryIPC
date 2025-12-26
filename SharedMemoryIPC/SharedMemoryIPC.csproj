@@ -3,9 +3,11 @@
 		<TargetFramework>net9.0</TargetFramework>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<Optimize>true</Optimize>
 		<Deterministic>true</Deterministic>
 	</PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <Optimize>true</Optimize>
+  </PropertyGroup>
 	<PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
 		<DefineConstants>OS_WINDOWS</DefineConstants>
 	</PropertyGroup>

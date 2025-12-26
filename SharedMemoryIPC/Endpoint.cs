@@ -61,6 +61,8 @@ public class Endpoint
 		return payloadSize;
 	}
 
+	public bool Write(MessageHeader header, uint timeoutMs = 1000) => this.Write(header, [], timeoutMs);
+
 	public bool Read<T>(out uint id, out T payload, uint timeoutMs = 1000)
 		where T : unmanaged
 	{
@@ -84,6 +86,8 @@ public class Endpoint
 
 		return true;
 	}
+
+	public bool Read(out MessageHeader header, uint timeoutMs = 1000) => this.Read(out header, out var _, timeoutMs);
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static PayloadType GetPayloadType<T>()
@@ -271,7 +275,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		if (!OperatingSystem.IsWindows())
 			throw new PlatformNotSupportedException($"{nameof(MemoryMappedFile.CreateOrOpen)} is only supported on Windows.");
 
-		using var mmfMutex = new Mutex(false, $"Global\\{this.Name}_MMF_Mutex");
+		using var mmfMutex = new Mutex(false, $"{this.Name}_MMF_Mutex");
 		mmfMutex.WaitOne();
 		try
 		{
@@ -307,7 +311,10 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 						{
 							if (waited >= maxWaitMs)
 								throw new TimeoutException($"Timeout waiting for shared memory region '{this.Name}' to be created.");
+
+							mmfMutex.ReleaseMutex();
 							Thread.Sleep(pollIntervalMs);
+							mmfMutex.WaitOne();
 							waited += pollIntervalMs;
 						}
 					}
