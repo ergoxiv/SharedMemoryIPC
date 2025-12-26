@@ -64,12 +64,13 @@ public enum PayloadType : byte
 
 	// Special types
 
-	Heartbeat = 0x77, // Heartbeat; No payload
-	Retry = 0x78,     // Retry; No payload
-	Error = 0x79,     // Error; Optional payload (e.g., error message)
-	Syn = 0x7A,       // Synchronization; Optional payload (e.g., timestamp)
-	Fin = 0x7B,       // Finish/close connection; No payload
-	Rst = 0x7C,       // Reset connection; No payload
+	Heartbeat = 0x76, // Heartbeat; No payload
+	Retry = 0x77,     // Retry; No payload
+	Error = 0x78,     // Error; Optional payload (e.g., error message)
+	Syn = 0x79,       // Synchronization; Optional payload (e.g., timestamp)
+	Fin = 0x7A,       // Finish/close connection; No payload
+	Rst = 0x7B,       // Reset connection; No payload
+	Register = 0x7C,  // Register; Optional payload (e.g., registration info)
 	Hello = 0x7D,     // Hello; No payload
 	Ack = 0x7E,       // Acknowledgment; No payload
 	NoPayload = 0x7F, // No payload; Used for signaling or notifications
@@ -106,8 +107,9 @@ public enum PayloadType : byte
 	GuidArray = Guid | 0x80,
 	BlobArray = Blob | 0x80,
 
-	Bye = 0xFD,     // Goodbye; No payload
-	NAck = 0xFE,    // Negative acknowledgment; No payload
+	Unregister = 0xFC, // Unregister; Optional payload (e.g., unregistration info)
+	Bye = 0xFD,        // Goodbye; No payload
+	NAck = 0xFE,       // Negative acknowledgment; No payload
 }
 
 public enum RingBufferFlags : uint
