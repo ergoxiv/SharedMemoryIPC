@@ -303,7 +303,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	// It is the responsibility of Endpoint to prep up the message header and payload.
 	// The write/read opearations within the ring buffer deal with atomically dealing
 	// with the ring buffer memory and updating the control variables.
-	public OpStatus Write(TMessageHeader msgHeader, byte[]? payload = null)
+	public OpStatus Write(TMessageHeader msgHeader, ReadOnlySpan<byte> payload = default)
 	{
 		for (; ; )
 		{
@@ -353,7 +353,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 				case State.Reserved:
 					this.ConsumeEntry(ref entry);
 					msgHeader = entry.MsgHeader;
-					payload = entry.MsgPayload ?? [];
+					payload = entry.MsgPayload;
 					return OpStatus.Ok;
 				case State.NoEntry:
 					msgHeader = default;
@@ -403,10 +403,10 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		this.disposedValue = true;
 	}
 
-	private ref struct EntryDesc(BlockHeader* blkHeader, byte* blkPayload, TMessageHeader msgHeader = default, byte[]? msgPayload = null)
+	private ref struct EntryDesc(BlockHeader* blkHeader, byte* blkPayload, TMessageHeader msgHeader = default, ReadOnlySpan<byte> msgPayload = default)
 	{
 		public TMessageHeader MsgHeader = msgHeader;
-		public byte[]? MsgPayload = msgPayload;
+		public ReadOnlySpan<byte> MsgPayload = msgPayload;
 		public BlockHeader* BlockHeader = blkHeader;
 		public byte* BlockPayload = blkPayload;
 		public ulong Offset = 0;
@@ -547,7 +547,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		*(TMessageHeader*)(entry.BlockPayload + entry.Offset) = entry.MsgHeader;
 
 		// Write the message payload if it exists
-		if (entry.MsgHeader.Length > 0 && entry.MsgPayload != null)
+		if (entry.MsgHeader.Length > 0 && !entry.MsgPayload.IsEmpty)
 		{
 			fixed (byte* src = entry.MsgPayload)
 			{
@@ -644,16 +644,9 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 
 		if (entry.MsgHeader.Length > 0)
 		{
-			entry.MsgPayload = new byte[entry.MsgHeader.Length];
-			fixed (byte* dst = entry.MsgPayload)
-			{
-				Buffer.MemoryCopy(
-					entry.BlockPayload + entry.Offset + MessageHeaderSize,
-					dst,
-					entry.MsgHeader.Length,
-					entry.MsgHeader.Length
-				);
-			}
+			entry.MsgPayload = new ReadOnlySpan<byte>(
+				entry.BlockPayload + entry.Offset + MessageHeaderSize,
+				(int)entry.MsgHeader.Length);
 		}
 	}
 

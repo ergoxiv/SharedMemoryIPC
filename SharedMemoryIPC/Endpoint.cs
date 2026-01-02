@@ -205,29 +205,33 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
 
+		var rb = this.ringBuffer!;
+		var readEvent = this.canReadEvent;
+		var writeEvent = this.canWriteEvent;
+
+		int i = 0;
 		OpStatus status;
 		for (; ; )
 		{
-			status = this.ringBuffer!.Write(header, payload.ToArray());
-
+			status = rb.Write(header, payload);
 			if (status == OpStatus.Ok)
 			{
-				NativeMethods.SetEvent(this.canReadEvent);
+				NativeMethods.SetEvent(readEvent);
 				return true;
 			}
 
-			for (int i = 0; i < SpinWaitIterations; i++)
+			for (; i < SpinWaitIterations; i++)
 			{
-				status = this.ringBuffer!.Write(header, payload.ToArray());
+				Thread.SpinWait(SpinWaitDelay);
+				status = rb.Write(header, payload);
 				if (status == OpStatus.Ok)
 				{
-					NativeMethods.SetEvent(this.canReadEvent);
+					NativeMethods.SetEvent(readEvent);
 					return true;
 				}
-				Thread.SpinWait(SpinWaitDelay);
 			}
 
-			if (NativeMethods.WaitForSingleObject(this.canWriteEvent, timeoutMs) != WAIT_OBJECT_0)
+			if (NativeMethods.WaitForSingleObject(writeEvent, timeoutMs) != WAIT_OBJECT_0)
 				return false;
 		}
 	}
@@ -237,29 +241,33 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
 
+		var rb = this.ringBuffer!;
+		var readEvent = this.canReadEvent;
+		var writeEvent = this.canWriteEvent;
+
+		int i = 0;
 		OpStatus status;
 		for (; ; )
 		{
-			status = this.ringBuffer!.Read(out header, out payload);
-
+			status = rb.Read(out header, out payload);
 			if (status == OpStatus.Ok)
 			{
-				NativeMethods.SetEvent(this.canWriteEvent);
+				NativeMethods.SetEvent(writeEvent);
 				return true;
 			}
 
-			for (int i = 0; i < SpinWaitIterations; i++)
+			for (; i < SpinWaitIterations; i++)
 			{
-				status = this.ringBuffer!.Read(out header, out payload);
+				Thread.SpinWait(SpinWaitDelay);
+				status = rb.Read(out header, out payload);
 				if (status == OpStatus.Ok)
 				{
-					NativeMethods.SetEvent(this.canWriteEvent);
+					NativeMethods.SetEvent(writeEvent);
 					return true;
 				}
-				Thread.SpinWait(SpinWaitDelay);
 			}
 
-			if (NativeMethods.WaitForSingleObject(this.canReadEvent, timeoutMs) != WAIT_OBJECT_0)
+			if (NativeMethods.WaitForSingleObject(readEvent, timeoutMs) != WAIT_OBJECT_0)
 				return false;
 		}
 	}
@@ -437,14 +445,14 @@ static partial class NativeMethods
 	[MarshalAs(UnmanagedType.Bool)] bool bInitialState,
 	string lpName);
 
-	[LibraryImport("kernel32.dll", SetLastError = true)]
+	[LibraryImport("kernel32.dll", SetLastError = false)]
 	[return: MarshalAs(UnmanagedType.Bool)]
 	public static partial bool SetEvent(IntPtr hEvent);
 
-	[LibraryImport("kernel32.dll", SetLastError = true)]
+	[LibraryImport("kernel32.dll", SetLastError = false)]
 	public static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
-	[LibraryImport("kernel32.dll", SetLastError = true)]
+	[LibraryImport("kernel32.dll", SetLastError = false)]
 	[return: MarshalAs(UnmanagedType.Bool)]
 	public static partial bool CloseHandle(IntPtr hObject);
 }
