@@ -305,6 +305,13 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	// with the ring buffer memory and updating the control variables.
 	public OpStatus Write(TMessageHeader msgHeader, ReadOnlySpan<byte> payload = default)
 	{
+		if (this.rbHeaderPtr->Flags.HasFlag(RingBufferFlags.Shutdown))
+		{
+			msgHeader = default;
+			payload = [];
+			return OpStatus.Error;
+		}
+
 		for (; ; )
 		{
 			ulong pHead = Interlocked.Read(ref this.rbHeaderPtr->ProducerHead);
@@ -339,6 +346,13 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 
 	public OpStatus Read(out TMessageHeader msgHeader, out ReadOnlySpan<byte> payload)
 	{
+		if (this.rbHeaderPtr->Flags.HasFlag(RingBufferFlags.Shutdown))
+		{
+			msgHeader = default;
+			payload = [];
+			return OpStatus.Error;
+		}
+
 		for (; ; )
 		{
 			ulong cHead = Interlocked.Read(ref this.rbHeaderPtr->ConsumerHead);

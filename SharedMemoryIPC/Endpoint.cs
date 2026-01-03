@@ -213,6 +213,9 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		OpStatus status;
 		for (; ; )
 		{
+			if (rb == null)
+				return false;
+
 			status = rb.Write(header, payload);
 			if (status == OpStatus.Ok)
 			{
@@ -241,7 +244,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
 
-		var rb = this.ringBuffer!;
+		var rb = this.ringBuffer;
 		var readEvent = this.canReadEvent;
 		var writeEvent = this.canWriteEvent;
 
@@ -249,6 +252,13 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		OpStatus status;
 		for (; ; )
 		{
+			if (rb == null)
+			{
+				header = default;
+				payload = default;
+				return false;
+			}
+
 			status = rb.Read(out header, out payload);
 			if (status == OpStatus.Ok)
 			{
