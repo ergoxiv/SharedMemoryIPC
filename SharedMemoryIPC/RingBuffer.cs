@@ -11,7 +11,7 @@
 // GNU General Public License for more details.
 //
 // You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 using System;
 using System.Runtime.CompilerServices;
@@ -163,26 +163,52 @@ public unsafe struct BlockHeader // 256 bytes
 	public ulong Consumed;
 }
 
+/// <summary>
+/// An interface for defining message headers used in the ring buffer.
+/// </summary>
 public interface IMessageHeader
 {
+	/// <summary>
+	/// Gets or sets the type of payload represented by this instance.
+	/// </summary>
 	PayloadType Type { get; set; }
+
+	/// <summary>
+	/// Gets or sets the total length, in bytes, of the data or stream.
+	/// </summary>
 	ulong Length { get; set; }
 }
 
+/// <summary>
+/// The standard message header for messages in the ring buffer.
+/// You can define your own message header to better suit your
+/// use case by creating a struct that implements <see cref="IMessageHeader"/>.
+/// </summary>
+/// <param name="id">
+/// The user-defined message identifier.
+/// </param>
+/// <param name="type">
+/// The type of the message payload.
+/// </param>
+/// <param name="length">
+/// The length of the message payload in bytes.
+/// </param>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public unsafe struct MessageHeader(uint id = 0, PayloadType type = PayloadType.Invalid, ulong length = 0) : IMessageHeader // 16 bytes
 {
-	public uint Id = id;             // User-defined message identifier
-	private PayloadType _type = type;  // Type of the message payload
-	private fixed byte _reserved[3]; // Padding to make the struct 16 bytes
-	private ulong _length = length;    // Length of the message payload
+	public uint Id = id;              // User-defined message identifier
+	private PayloadType _type = type; // Type of the message payload
+	private fixed byte _reserved[3];  // Padding to make the struct 16 bytes
+	private ulong _length = length;   // Length of the message payload
 
+	/// <inheritdoc/>
 	public PayloadType Type
 	{
 		readonly get => this._type;
 		set => this._type = value;
 	}
 
+	/// <inheritdoc/>
 	public ulong Length
 	{
 		readonly get => this._length;
@@ -197,7 +223,7 @@ public unsafe class RingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, b
 }
 
 /// <summary>
-/// TODO
+/// The core of the shared-memory IPC mechanism: a multi-producer, multi-consumer (MPMC) ring buffer.
 /// </summary>
 /// <remarks>
 /// <para>The shared memory layout is:<br/><br/>
@@ -213,10 +239,7 @@ public unsafe class RingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, b
 public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	where TMessageHeader : unmanaged, IMessageHeader
 {
-	// TODO: Message: Header (fixed size) + Payload (variable byte array)
-	// TODO: Block struct
-
-	// TODO (Design):
+	// Design notes:
 	// - | RingBufferHeader | BlockHeaders[N] | Blocks[N] |
 	//   - The ring buffer header stores the head pointers for the producer(s) and consumer(s) in the form of offsets.
 	//   - Each block header is a fixed-size struct that stores the four cursors (allocated, committed, reserved, consumed) as offsets within the block, starting from 0.
@@ -253,6 +276,19 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private readonly ulong vsnMask;
 	private bool disposedValue;
 
+	/// <summary>
+	/// Initializes a new instance of the <see cref="RingBuffer{TMessageHeader}"/> class.
+	/// </summary>
+	/// <param name="shmPtr">The pointer to the start of the shared memory segment.</param>
+	/// <param name="blockCount">The number of blocks in the ring buffer.</param>
+	/// <param name="blockSize">The size of each block in bytes.</param>
+	/// <param name="isShmemOwner">
+	/// A value indicating whether this instance is the owner of the shared memory segment.
+	/// This affects whether the ring buffer initializes the memory region.
+	/// </param>
+	/// <exception cref="ArgumentOutOfRangeException">
+	/// Thrown if <paramref name="blockSize"/> exceeds the maximum allowed size.
+	/// </exception>
 	public RingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, bool isShmemOwner)
 	{
 		ArgumentNullException.ThrowIfNull(shmPtr);
@@ -278,7 +314,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		this.blkHeaderStartPtr = shmPtr + RingBufferHeaderSize;
 		this.blkPayloadStartPtr = this.blkHeaderStartPtr + BlockHeaderSize * blockCount;
 
-		// NOTE: Endpoint ensures exclusive creation of the shared
+		// NOTE: The endpoint ensures exclusive creation of the shared
 		// memory segment, so no synchronization is needed here
 		if (isShmemOwner)
 		{
@@ -292,17 +328,31 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		this.Dispose(false);
 	}
 
-	// TODO: Implement a shutting down expression that checks if the shutdown flag is set and prevents further writes.
-
+	/// <summary>
+	/// Disposes the ring buffer and releases associated resources.
+	/// </summary>
 	public void Dispose()
 	{
 		this.Dispose(true);
 		GC.SuppressFinalize(this);
 	}
 
-	// It is the responsibility of Endpoint to prep up the message header and payload.
-	// The write/read opearations within the ring buffer deal with atomically dealing
-	// with the ring buffer memory and updating the control variables.
+	/// <summary>
+	/// Attempts to enqueue a message into the ring buffer.
+	/// </summary>
+	/// <param name="msgHeader">
+	/// The message header containing metadata about the message.
+	/// </param>
+	/// <param name="payload">
+	/// The payload of the message.
+	/// </param>
+	/// <returns>
+	/// The operation status indicating the result of the write attempt.
+	/// </returns>
+	/// <remarks>
+	/// It is the responsibility of the caller to ensure that the message
+	/// header and payload are correctly prepared before calling this method.
+	/// </remarks>
 	public OpStatus Write(TMessageHeader msgHeader, ReadOnlySpan<byte> payload = default)
 	{
 		if (this.rbHeaderPtr->Flags.HasFlag(RingBufferFlags.Shutdown))
@@ -344,6 +394,18 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		}
 	}
 
+	/// <summary>
+	/// Attempts to dequeue the next available message from the ring buffer.
+	/// </summary>
+	/// <param name="msgHeader">
+	/// Output parameter to store the message header of the dequeued message.
+	/// </param>
+	/// <param name="payload">
+	/// Output parameter to store the payload of the dequeued message.
+	/// </param>
+	/// <returns>
+	/// The operation status indicating the result of the read attempt.
+	/// </returns>
 	public OpStatus Read(out TMessageHeader msgHeader, out ReadOnlySpan<byte> payload)
 	{
 		if (this.rbHeaderPtr->Flags.HasFlag(RingBufferFlags.Shutdown))
@@ -402,7 +464,6 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		if (disposing)
 		{
 			/* Dispose of managed resources here */
-			// TODO: Verify we're diposing of everything correctly
 			if (this.isShmemOwner)
 			{
 				Interlocked.Or(ref Unsafe.As<RingBufferFlags, uint>(ref this.rbHeaderPtr->Flags),
@@ -411,7 +472,6 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		}
 
 		/* Dipose of unmanaged resources here */
-		// TODO: Verify we're diposing of everything correctly
 		this.shmPtr = null;
 		this.rbHeaderPtr = null;
 		this.disposedValue = true;

@@ -11,7 +11,7 @@
 // GNU General Public License for more details.
 //
 // You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 using System;
 using System.Collections.Generic;
@@ -21,23 +21,34 @@ using System.Runtime.InteropServices;
 
 namespace SharedMemoryIPC;
 
+/// <summary>
+/// An example payload structure for benchmarking.
+/// </summary>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct BenchmarkPayload
+public unsafe struct BenchmarkPayload
 {
 	public long Timestamp;
 	public uint Sequence;
-}
+	public fixed byte _Padding[4084]; // Padding to make the struct 4KiB
+}	
 
+/// <summary>
+/// An example benchmark for measuring throughput and latency
+/// between IPC endpoints (client and server).
+/// </summary>
 public static class Benchmark
 {
 	const string ShmNameC2S = "BenchmarkIPC_C2S";
 	const string ShmNameS2C = "BenchmarkIPC_S2C";
-	const uint BlockCount = 16; // 128
-	const ulong BlockSize = 4096; // 8192
+	const uint BlockCount = 128;
+	const ulong BlockSize = 8192;
 	const int MessageCount = 1_000_000;
 	const int LatencySampleRate = 1000;
 	const int LatencySampleCount = MessageCount / LatencySampleRate;
 
+	/// <summary>
+	/// Example server that echoes back received messages.
+	/// </summary>
 	public static void RunServer()
 	{
 		using var endpointC2S = new Endpoint(ShmNameC2S, BlockCount, BlockSize);
@@ -55,6 +66,10 @@ public static class Benchmark
 		Console.WriteLine($"Server: Processed {received} messages.");
 	}
 
+	/// <summary>
+	/// Example client that sends messages and measures
+	/// throughput and latency on round-trip communication.
+	/// </summary>
 	public static void RunClient()
 	{
 		using var endpointC2S = new Endpoint(ShmNameC2S);

@@ -11,7 +11,7 @@
 // GNU General Public License for more details.
 //
 // You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 using System;
 using System.ComponentModel;
@@ -23,19 +23,33 @@ using System.Threading;
 
 namespace SharedMemoryIPC;
 
-public class Endpoint
-	: Endpoint<MessageHeader>
+/// <inheritdoc/>
+public class Endpoint : Endpoint<MessageHeader>
 {
+	/// <inheritdoc/>
 	public Endpoint(string shmFilename, uint blockCount, ulong blockSize)
 		: base(shmFilename, blockCount, blockSize)
 	{
 	}
 
+	/// <inheritdoc/>
 	public Endpoint(string shmFilename)
 		: base(shmFilename)
 	{
 	}
 
+	/// <summary>
+	/// Writes a typed message to the shared memory segment.
+	/// </summary>
+	/// <typeparam name="T">The type of the payload to write.</typeparam>
+	/// <param name="id">The message identifier.</param>
+	/// <param name="payload">The message payload.</param>
+	/// <param name="timeoutMs">
+	/// The timeout in milliseconds to wait for space to become available.
+	/// </param>
+	/// <returns>
+	/// The number of bytes written if the message was written successfully; otherwise, zero.
+	/// </returns>
 	public int Write<T>(uint id, T payload, uint timeoutMs = 1000)
 		where T : unmanaged
 	{
@@ -61,8 +75,33 @@ public class Endpoint
 		return payloadSize;
 	}
 
+	/// <summary>
+	/// Writes a header-only message to the shared memory segment.
+	/// </summary>
+	/// <param name="header">The message header.</param>
+	/// <param name="timeoutMs">
+	/// The timeout in milliseconds to wait for space to become available.
+	/// </param>
+	/// <returns>
+	/// True if the message was written successfully; otherwise, false.
+	/// </returns>
 	public bool Write(MessageHeader header, uint timeoutMs = 1000) => this.Write(header, [], timeoutMs);
 
+	/// <summary>
+	/// Reads a typed message from the shared memory segment.
+	/// </summary>
+	/// <typeparam name="T">The type of the payload to read.</typeparam>s
+	/// <param name="id">The output message identifier.</param>
+	/// <param name="payload">The output message payload.</param>
+	/// <param name="timeoutMs">
+	/// The timeout in milliseconds to wait for data to become available.
+	/// </param>
+	/// <returns>
+	/// True if a message was read successfully; otherwise, false.
+	/// </returns>
+	/// <exception cref="InvalidOperationException">
+	/// Thrown when the payload type or size does not match the expected type or size.
+	/// </exception>
 	public bool Read<T>(out uint id, out T payload, uint timeoutMs = 1000)
 		where T : unmanaged
 	{
@@ -87,6 +126,16 @@ public class Endpoint
 		return true;
 	}
 
+	/// <summary>
+	/// Reads a header-only message from the shared memory segment.
+	/// </summary>
+	/// <param name="header">The output message header.</param>
+	/// <param name="timeoutMs">
+	/// The timeout in milliseconds to wait for data to become available.
+	/// </param>
+	/// <returns>
+	/// True if a message was read successfully; otherwise, false.
+	/// </returns>
 	public bool Read(out MessageHeader header, uint timeoutMs = 1000) => this.Read(out header, out var _, timeoutMs);
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -114,13 +163,22 @@ public class Endpoint
 	}
 }
 
-// TODO: Endpoint class should have a helper that constructs the message header + payload in a single contiguous memory block, so users don't have to do this manually every time.
 
+/// <summary>
+/// A shared memory inter-process communication (IPC) endpoint
+/// based on an internal high-performance ring buffer.
+/// </summary>
+/// <typeparam name="TMessageHeader">
+/// The type of the message header used for communication.
+/// </typeparam>
 public unsafe class Endpoint<TMessageHeader> : IDisposable
 	where TMessageHeader : unmanaged, IMessageHeader
 {
-	const int SpinWaitIterations = 100;
-	const int SpinWaitDelay = 10;
+	protected const int SpinWaitIterations = 100;
+	protected const int SpinWaitDelay = 10;
+
+	private const uint WAIT_OBJECT_0 = 0x00000000;
+	private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
 	private readonly bool desiredShmOwner;
 	private ulong sharedMemorySize;
@@ -136,7 +194,14 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	private MemoryMappedViewAccessor? accessor = null;
 	private byte* shmPtr = null;
 
-	// This constructor be used by users who do not mind which endpoint is the owner of the shared memory segment
+	/// <summary>
+	/// Initializes a new instance of the <see cref="Endpoint{TMessageHeader}"/> class.
+	/// This is intended to be used by callers who do not mind which
+	/// endpoint is the owner of the shared memory segment.
+	/// </summary>
+	/// <param name="shmFilename">The name of the shared memory segment.</param>
+	/// <param name="blockCount">The number of blocks in the ring buffer.</param>
+	/// <param name="blockSize">The size of each block in bytes.</param>
 	public Endpoint(string shmFilename, uint blockCount, ulong blockSize)
 	{
 		ArgumentException.ThrowIfNullOrEmpty(shmFilename, nameof(shmFilename));
@@ -155,7 +220,12 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		this.OpenMemoryMappedFile();
 	}
 
-	// To be used by users who enforce non-ownership on this endpoint
+	/// <summary>
+	/// Initializes a new instance of the <see cref="Endpoint{TMessageHeader}"/> class.
+	/// This is intended to be used by callers who wish to enforce non-ownership
+	/// on this endpoint.
+	/// </summary>
+	/// <param name="shmFilename">The name of the shared memory segment.</param>
 	public Endpoint(string shmFilename)
 	{
 		ArgumentException.ThrowIfNullOrEmpty(shmFilename);
@@ -174,29 +244,38 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		this.Dispose(false);
 	}
 
+	/// <summary>
+	/// Gets the name of the shared memory segment.
+	/// </summary>
 	public string Name { get; private set; }
 
+	/// <summary>
+	/// Disposes the endpoint and releases all associated resources.
+	/// </summary>
 	public void Dispose()
 	{
 		this.Dispose(true);
 		GC.SuppressFinalize(this);
 	}
 
-	private void Dispose(bool disposing)
-	{
-		if (this.disposedValue)
-			return;
-
-		if (disposing)
-		{
-			/* Dispose of managed resources here */
-			this.CloseMemoryMappedFile();
-		}
-
-		/* Dipose of unmanaged resources here */
-		this.disposedValue = true;
-	}
-
+	/// <summary>
+	/// Writes a message to the shared memory segment.
+	/// </summary>
+	/// <param name="header">The message header.</param>
+	/// <param name="payload">The message payload.</param>
+	/// <param name="timeoutMs">
+	/// The timeout in milliseconds to wait for space to become available.
+	/// </param>
+	/// <returns>
+	/// True if the message was written successfully; otherwise, false.
+	/// In other words, false indicates either a timeout or full ring buffer.
+	/// </returns>
+	/// <exception cref="ArgumentOutOfRangeException">
+	/// Thrown when the payload size exceeds the block size.
+	/// </exception>
+	/// <exception cref="ArgumentException">
+	/// Thrown when the timeout is less than or equal to zero.
+	/// </exception>
 	public bool Write(TMessageHeader header, ReadOnlySpan<byte> payload, uint timeoutMs = 1000)
 	{
 		if ((ulong)payload.Length > this.blockSize)
@@ -239,6 +318,21 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		}
 	}
 
+	/// <summary>
+	/// Reads a message from the shared memory segment.
+	/// </summary>
+	/// <param name="header">The output message header.</param>
+	/// <param name="payload">The output message payload.</param>
+	/// <param name="timeoutMs">
+	/// The timeout in milliseconds to wait for data to become available.
+	/// </param>
+	/// <returns>
+	/// True if a message was read successfully; otherwise, false.
+	/// In other words, false indicates either a timeout or empty ring buffer.
+	/// </returns>
+	/// <exception cref="ArgumentException">
+	/// Thrown when the timeout is less than or equal to zero.
+	/// </exception>
 	public bool Read(out TMessageHeader header, out ReadOnlySpan<byte> payload, uint timeoutMs = 1000)
 	{
 		if (timeoutMs <= 0)
@@ -282,7 +376,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		}
 	}
 
-	private void OpenMemoryMappedFile()
+	protected void OpenMemoryMappedFile()
 	{
 		// Close any existing MMF connections if there are any
 		this.CloseMemoryMappedFile();
@@ -300,7 +394,6 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			bool isTrueOwner = false;
 
 			// Determine if this endpoint is the true owner (creator) of the shared memory segment
-
 			try
 			{
 				this.mmf = MemoryMappedFile.OpenExisting(this.Name, MemoryMappedFileRights.ReadWrite);
@@ -337,13 +430,6 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 						}
 					}
 				}
-
-
-				//if (!this.desiredShmOwner)
-				//	throw;
-
-				//this.mmf = MemoryMappedFile.CreateNew(this.Name, (long)this.sharedMemorySize, MemoryMappedFileAccess.ReadWrite);
-				//isTrueOwner = true;
 			}
 
 			if (isTrueOwner)
@@ -404,7 +490,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		}
 	}
 
-	private void CloseMemoryMappedFile()
+	protected void CloseMemoryMappedFile()
 	{
 		if (this.canReadEvent != IntPtr.Zero)
 		{
@@ -434,7 +520,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		this.mmf = null;
 	}
 
-	private static IntPtr CreateOrOpenEvent(string name)
+	protected static IntPtr CreateOrOpenEvent(string name)
 	{
 		var handle = NativeMethods.CreateEvent(IntPtr.Zero, false, false, name);
 		if (handle == IntPtr.Zero || handle == INVALID_HANDLE_VALUE)
@@ -442,27 +528,18 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		return handle;
 	}
 
-	private const uint WAIT_OBJECT_0 = 0x00000000;
-	private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
-}
+	protected void Dispose(bool disposing)
+	{
+		if (this.disposedValue)
+			return;
 
-static partial class NativeMethods
-{
-	[LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16, EntryPoint = "CreateEventW")]
-	public static partial IntPtr CreateEvent(
-	IntPtr lpEventAttributes,
-	[MarshalAs(UnmanagedType.Bool)] bool bManualReset,
-	[MarshalAs(UnmanagedType.Bool)] bool bInitialState,
-	string lpName);
+		if (disposing)
+		{
+			/* Dispose of managed resources here */
+			this.CloseMemoryMappedFile();
+		}
 
-	[LibraryImport("kernel32.dll", SetLastError = false)]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	public static partial bool SetEvent(IntPtr hEvent);
-
-	[LibraryImport("kernel32.dll", SetLastError = false)]
-	public static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
-	[LibraryImport("kernel32.dll", SetLastError = false)]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	public static partial bool CloseHandle(IntPtr hObject);
+		/* Dipose of unmanaged resources here */
+		this.disposedValue = true;
+	}
 }
