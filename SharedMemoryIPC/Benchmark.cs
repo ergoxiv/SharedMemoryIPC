@@ -30,7 +30,7 @@ public unsafe struct BenchmarkPayload
 	public long Timestamp;
 	public uint Sequence;
 	public fixed byte _Padding[4084]; // Padding to make the struct 4KiB
-}	
+}
 
 /// <summary>
 /// An example benchmark for measuring throughput and latency
