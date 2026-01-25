@@ -26,6 +26,40 @@ namespace SharedMemoryIPC;
 /// <inheritdoc/>
 public class Endpoint : Endpoint<MessageHeader>
 {
+	private static class PayloadTypeCache<T>
+	{
+		public static readonly PayloadType Value = DetermineType();
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static PayloadType DetermineType()
+		{
+			Type t = typeof(T);
+
+			return t switch
+			{
+				_ when t == typeof(bool) => PayloadType.Bit,
+				_ when t == typeof(sbyte) => PayloadType.Int8,
+				_ when t == typeof(byte) => PayloadType.UInt8,
+				_ when t == typeof(short) => PayloadType.Int16,
+				_ when t == typeof(ushort) => PayloadType.UInt16,
+				_ when t == typeof(int) => PayloadType.Int32,
+				_ when t == typeof(uint) => PayloadType.UInt32,
+				_ when t == typeof(long) => PayloadType.Int64,
+				_ when t == typeof(ulong) => PayloadType.UInt64,
+				_ when t == typeof(Half) => PayloadType.Float16,
+				_ when t == typeof(float) => PayloadType.Float32,
+				_ when t == typeof(double) => PayloadType.Float64,
+				_ when t == typeof(Guid) => PayloadType.Guid,
+				_ => PayloadType.Blob,
+			};
+		}
+	}
+
+	private static class MarshalSizeOfCache<T>
+	{
+		public static readonly int Value = Marshal.SizeOf<T>();
+	}
+
 	/// <inheritdoc/>
 	public Endpoint(string shmFilename, uint blockCount, ulong blockSize)
 		: base(shmFilename, blockCount, blockSize)
@@ -53,26 +87,40 @@ public class Endpoint : Endpoint<MessageHeader>
 	public int Write<T>(uint id, T payload, uint timeoutMs = 1000)
 		where T : unmanaged
 	{
-		PayloadType type = GetPayloadType<T>();
-		int payloadSize = Marshal.SizeOf<T>();
+		PayloadType type = PayloadTypeCache<T>.Value;
+		int payloadSize = MarshalSizeOfCache<T>.Value;
 
-		Span<byte> payloadSpan = payloadSize <= 256
-			? stackalloc byte[payloadSize]
-			: new byte[payloadSize];
+		byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(payloadSize);
 
-		MemoryMarshal.Write(payloadSpan, in payload);
-
-		var header = new MessageHeader
+		try
 		{
-			Id = id,
-			Type = type,
-			Length = (ulong)payloadSize,
-		};
+			if (payloadSize <= 256)
+			{
+				Span<byte> stackSpan = stackalloc byte[payloadSize];
+				MemoryMarshal.Write(stackSpan, in payload);
+				stackSpan.CopyTo(rented.AsSpan(0, payloadSize));
+			}
+			else
+			{
+				MemoryMarshal.Write(rented.AsSpan(0, payloadSize), in payload);
+			}
 
-		if (!this.Write(header, payloadSpan, timeoutMs))
-			return 0;
+			var header = new MessageHeader
+			{
+				Id = id,
+				Type = type,
+				Length = (ulong)payloadSize,
+			};
 
-		return payloadSize;
+			if (!this.Write(header, rented.AsSpan(0, payloadSize), timeoutMs))
+				return 0;
+
+			return payloadSize;
+		}
+		finally
+		{
+			System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+		}
 	}
 
 	/// <summary>
@@ -108,8 +156,8 @@ public class Endpoint : Endpoint<MessageHeader>
 		id = 0;
 		payload = default;
 
-		PayloadType expectedType = GetPayloadType<T>();
-		int expectedSize = Marshal.SizeOf<T>();
+		PayloadType expectedType = PayloadTypeCache<T>.Value;
+		int expectedSize = MarshalSizeOfCache<T>.Value;
 
 		if (!this.Read(out MessageHeader header, out ReadOnlySpan<byte> payloadSpan, timeoutMs))
 			return false;
@@ -137,32 +185,7 @@ public class Endpoint : Endpoint<MessageHeader>
 	/// True if a message was read successfully; otherwise, false.
 	/// </returns>
 	public bool Read(out MessageHeader header, uint timeoutMs = 1000) => this.Read(out header, out var _, timeoutMs);
-
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	private static PayloadType GetPayloadType<T>()
-	{
-		Type t = typeof(T);
-
-		return t switch
-		{
-			_ when t == typeof(bool) => PayloadType.Bit,
-			_ when t == typeof(sbyte) => PayloadType.Int8,
-			_ when t == typeof(byte) => PayloadType.UInt8,
-			_ when t == typeof(short) => PayloadType.Int16,
-			_ when t == typeof(ushort) => PayloadType.UInt16,
-			_ when t == typeof(int) => PayloadType.Int32,
-			_ when t == typeof(uint) => PayloadType.UInt32,
-			_ when t == typeof(long) => PayloadType.Int64,
-			_ when t == typeof(ulong) => PayloadType.UInt64,
-			_ when t == typeof(Half) => PayloadType.Float16,
-			_ when t == typeof(float) => PayloadType.Float32,
-			_ when t == typeof(double) => PayloadType.Float64,
-			_ when t == typeof(Guid) => PayloadType.Guid,
-			_ => PayloadType.Blob,
-		};
-	}
 }
-
 
 /// <summary>
 /// A shared memory inter-process communication (IPC) endpoint
@@ -176,6 +199,9 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 {
 	protected const int SpinWaitIterations = 100;
 	protected const int SpinWaitDelay = 10;
+	protected const int YieldIterations = 10;
+	protected const int SpinWaitLimit = SpinWaitIterations;
+	protected const int YieldLimit = SpinWaitIterations + YieldIterations;
 
 	private const uint WAIT_OBJECT_0 = 0x00000000;
 	private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
@@ -188,7 +214,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 
 	private IntPtr canReadEvent = IntPtr.Zero;  // Signaled after a write to indicate data is available to read
 	private IntPtr canWriteEvent = IntPtr.Zero; // Signaled after a read to indicate space is available to write
-
+	
 	private RingBuffer<TMessageHeader>? ringBuffer = null;
 	private MemoryMappedFile? mmf = null;
 	private MemoryMappedViewAccessor? accessor = null;
@@ -287,34 +313,36 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		var rb = this.ringBuffer!;
 		var readEvent = this.canReadEvent;
 		var writeEvent = this.canWriteEvent;
-
+		
 		int i = 0;
-		OpStatus status;
 		for (; ; )
 		{
 			if (rb == null)
 				return false;
 
-			status = rb.Write(header, payload);
-			if (status == OpStatus.Ok)
+			if (rb.Write(header, payload) == OpStatus.Ok)
 			{
 				NativeMethods.SetEvent(readEvent);
 				return true;
 			}
 
-			for (; i < SpinWaitIterations; i++)
+			if (i < SpinWaitLimit)
 			{
 				Thread.SpinWait(SpinWaitDelay);
-				status = rb.Write(header, payload);
-				if (status == OpStatus.Ok)
-				{
-					NativeMethods.SetEvent(readEvent);
-					return true;
-				}
+				++i;
 			}
+			else if (i < YieldLimit)
+			{
+				Thread.Yield();
+				++i;
+			}
+			else
+			{
+				if (NativeMethods.WaitForSingleObject(writeEvent, timeoutMs) != WAIT_OBJECT_0)
+					return false;
 
-			if (NativeMethods.WaitForSingleObject(writeEvent, timeoutMs) != WAIT_OBJECT_0)
-				return false;
+				i = 0;
+			}
 		}
 	}
 
@@ -343,7 +371,6 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		var writeEvent = this.canWriteEvent;
 
 		int i = 0;
-		OpStatus status;
 		for (; ; )
 		{
 			if (rb == null)
@@ -353,26 +380,33 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				return false;
 			}
 
-			status = rb.Read(out header, out payload);
-			if (status == OpStatus.Ok)
+			if (rb.Read(out header, out payload) == OpStatus.Ok)
 			{
 				NativeMethods.SetEvent(writeEvent);
 				return true;
 			}
 
-			for (; i < SpinWaitIterations; i++)
+			if (i < SpinWaitLimit)
 			{
 				Thread.SpinWait(SpinWaitDelay);
-				status = rb.Read(out header, out payload);
-				if (status == OpStatus.Ok)
-				{
-					NativeMethods.SetEvent(writeEvent);
-					return true;
-				}
+				++i;
 			}
+			else if (i < YieldLimit)
+			{
+				Thread.Yield();
+				++i;
+			}
+			else
+			{
+				if (NativeMethods.WaitForSingleObject(readEvent, timeoutMs) != WAIT_OBJECT_0)
+				{
+					header = default;
+					payload = default;
+					return false;
+				}
 
-			if (NativeMethods.WaitForSingleObject(readEvent, timeoutMs) != WAIT_OBJECT_0)
-				return false;
+				i = 0;
+			}
 		}
 	}
 

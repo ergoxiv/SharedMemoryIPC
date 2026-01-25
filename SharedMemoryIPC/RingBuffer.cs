@@ -125,6 +125,7 @@ public unsafe struct RingBufferHeader // 192 bytes
 	// Cache line 0: Metadata
 	[FieldOffset(0)]
 	public ulong SharedMemorySize; // Total size of the shared memory segment
+
 	[FieldOffset(8)]
 	public uint BlockCount;        // The number of blocks in the ring buffer
 
