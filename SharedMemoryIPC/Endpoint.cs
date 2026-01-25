@@ -203,6 +203,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	protected const int SpinWaitLimit = SpinWaitIterations;
 	protected const int YieldLimit = SpinWaitIterations + YieldIterations;
 
+	private const long CLEANUP_INTERVAL_TICKS = 5 * 10_000_000; // 5 seconds
 	private const uint WAIT_OBJECT_0 = 0x00000000;
 	private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
@@ -219,6 +220,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	private MemoryMappedFile? mmf = null;
 	private MemoryMappedViewAccessor? accessor = null;
 	private byte* shmPtr = null;
+	private long lastCleanupTimestamp = 0;
 
 	/// <summary>
 	/// Initializes a new instance of the <see cref="Endpoint{TMessageHeader}"/> class.
@@ -313,7 +315,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		var rb = this.ringBuffer!;
 		var readEvent = this.canReadEvent;
 		var writeEvent = this.canWriteEvent;
-		
+
 		int i = 0;
 		for (; ; )
 		{
@@ -338,6 +340,17 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			}
 			else
 			{
+				long now = DateTime.UtcNow.Ticks;
+				long last = Interlocked.Read(ref this.lastCleanupTimestamp);
+
+				if (now - last > CLEANUP_INTERVAL_TICKS)
+				{
+					if (Interlocked.CompareExchange(ref this.lastCleanupTimestamp, now, last) == last)
+					{
+						GC.Collect(0, GCCollectionMode.Optimized, blocking: false, compacting: false);
+					}
+				}
+
 				if (NativeMethods.WaitForSingleObject(writeEvent, timeoutMs) != WAIT_OBJECT_0)
 					return false;
 
@@ -398,6 +411,17 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			}
 			else
 			{
+				long now = DateTime.UtcNow.Ticks;
+				long last = Interlocked.Read(ref this.lastCleanupTimestamp);
+
+				if (now - last > CLEANUP_INTERVAL_TICKS)
+				{
+					if (Interlocked.CompareExchange(ref this.lastCleanupTimestamp, now, last) == last)
+					{
+						GC.Collect(0, GCCollectionMode.Optimized, blocking: false, compacting: false);
+					}
+				}
+
 				if (NativeMethods.WaitForSingleObject(readEvent, timeoutMs) != WAIT_OBJECT_0)
 				{
 					header = default;

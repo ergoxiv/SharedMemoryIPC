@@ -28,6 +28,7 @@ public static partial class NativeMethods
 		string lpName);
 
 	[LibraryImport("kernel32.dll", SetLastError = false)]
+	[SuppressGCTransition]
 	[return: MarshalAs(UnmanagedType.Bool)]
 	public static partial bool SetEvent(IntPtr hEvent);
 
