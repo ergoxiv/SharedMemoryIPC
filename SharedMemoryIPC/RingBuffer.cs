@@ -362,7 +362,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	/// </remarks>
 	public OpStatus Write(TMessageHeader msgHeader, ReadOnlySpan<byte> payload = default)
 	{
-		if (this.rbHeaderPtr->Flags.HasFlag(RingBufferFlags.Shutdown))
+		if ((this.rbHeaderPtr->Flags & RingBufferFlags.Shutdown) != 0)
 		{
 			msgHeader = default;
 			payload = [];
@@ -415,7 +415,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	/// </returns>
 	public OpStatus Read(out TMessageHeader msgHeader, out ReadOnlySpan<byte> payload)
 	{
-		if (this.rbHeaderPtr->Flags.HasFlag(RingBufferFlags.Shutdown))
+		if ((this.rbHeaderPtr->Flags & RingBufferFlags.Shutdown) != 0)
 		{
 			msgHeader = default;
 			payload = [];
