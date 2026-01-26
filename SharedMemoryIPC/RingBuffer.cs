@@ -281,6 +281,8 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private readonly ulong offMask;
 	private readonly int vsnBits;
 	private readonly ulong vsnMask;
+	private readonly ulong vsnShiftedIdxMask;
+	private readonly ulong vsnShiftedOffMask;
 	private bool disposedValue;
 
 	/// <summary>
@@ -316,6 +318,8 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		this.offMask = (this.offBits < 64) ? ((1UL << this.offBits) - 1) : ~0UL;
 		this.vsnBits = Math.Max(MinVersionBits, 64 - Math.Max(this.idxBits, this.offBits));
 		this.vsnMask = (this.vsnBits < 64) ? ((1UL << this.vsnBits) - 1) : ~0UL;
+		this.vsnShiftedIdxMask = this.vsnMask << this.idxBits;
+		this.vsnShiftedOffMask = this.vsnMask << this.offBits;
 
 		this.rbHeaderPtr = (RingBufferHeader*)shmPtr;
 		this.blkHeaderStartPtr = shmPtr + RingBufferHeaderSize;
@@ -516,10 +520,10 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private ulong GetCursorVsn(ulong cVal) => (cVal >> this.offBits) & this.vsnMask;
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	private ulong PkgHead(ulong idx, ulong vsn) => (idx & this.idxMask) | ((vsn << this.idxBits) & (this.vsnMask << this.idxBits));
+	private ulong PkgHead(ulong idx, ulong vsn) => (idx & this.idxMask) | ((vsn << this.idxBits) & this.vsnShiftedIdxMask);
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	private ulong PkgCursor(ulong off, ulong vsn) => (off & this.offMask) | ((vsn << this.offBits) & (this.vsnMask << this.offBits));
+	private ulong PkgCursor(ulong off, ulong vsn) => (off & this.offMask) | ((vsn << this.offBits) & this.vsnShiftedOffMask);
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static ulong AtomicMax(ref ulong location, ulong newVal)
