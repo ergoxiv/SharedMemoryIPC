@@ -84,43 +84,24 @@ public class Endpoint : Endpoint<MessageHeader>
 	/// <returns>
 	/// The number of bytes written if the message was written successfully; otherwise, zero.
 	/// </returns>
-	public int Write<T>(uint id, T payload, uint timeoutMs = 1000)
-		where T : unmanaged
+	public int Write<T>(uint id, in T payload, uint timeoutMs = 1000)
+	where T : unmanaged
 	{
 		PayloadType type = PayloadTypeCache<T>.Value;
 		int payloadSize = MarshalSizeOfCache<T>.Value;
 
-		byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(payloadSize);
-
-		try
+		var header = new MessageHeader
 		{
-			if (payloadSize <= 256)
-			{
-				Span<byte> stackSpan = stackalloc byte[payloadSize];
-				MemoryMarshal.Write(stackSpan, in payload);
-				stackSpan.CopyTo(rented.AsSpan(0, payloadSize));
-			}
-			else
-			{
-				MemoryMarshal.Write(rented.AsSpan(0, payloadSize), in payload);
-			}
+			Id = id,
+			Type = type,
+			Length = (ulong)payloadSize,
+		};
 
-			var header = new MessageHeader
-			{
-				Id = id,
-				Type = type,
-				Length = (ulong)payloadSize,
-			};
+		ReadOnlySpan<byte> payloadSpan = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref Unsafe.AsRef(in payload), 1));
+		if (!this.Write(header, payloadSpan, timeoutMs))
+			return 0;
 
-			if (!this.Write(header, rented.AsSpan(0, payloadSize), timeoutMs))
-				return 0;
-
-			return payloadSize;
-		}
-		finally
-		{
-			System.Buffers.ArrayPool<byte>.Shared.Return(rented);
-		}
+		return payloadSize;
 	}
 
 	/// <summary>
@@ -175,6 +156,63 @@ public class Endpoint : Endpoint<MessageHeader>
 	}
 
 	/// <summary>
+	/// Reads a message of type T directly from shared memory, returning
+	/// a reference to the data if available.
+	/// </summary>
+	/// <remarks>
+	/// The returned reference points directly to the shared buffer and
+	/// is only valid until the buffer changes. The data may be overwritten
+	/// by subsequent operations. If no message is available within the
+	/// timeout, returns a null reference and sets id to zero.
+	/// Do NOT write to the returned reference.
+	/// </remarks>
+	/// <typeparam name="T">The unmanaged message type.</typeparam>
+	/// <param name="id">Set to the message identifier if successful; otherwise, zero.</param>
+	/// <param name="timeoutMs">Timeout in milliseconds to wait for data.</param>
+	/// <returns>
+	/// A read-only reference to the message data if available; otherwise, a null reference.
+	/// </returns>
+	public ref readonly T ReadDirect<T>(out uint id, uint timeoutMs = 1000) where T : unmanaged
+	{
+		if (!this.Read(out MessageHeader header, out ReadOnlySpan<byte> payloadSpan, timeoutMs))
+		{
+			id = 0;
+			return ref Unsafe.NullRef<T>();
+		}
+
+		id = header.Id;
+		return ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, T>(payloadSpan));
+	}
+
+	/// <summary>
+	/// Reads a message of type T directly from shared memory, returning
+	/// a reference to the data if available.
+	/// </summary>
+	/// <remarks>
+	/// An unsafe context variant of <see cref="ReadDirect{T}(out uint, uint)"/>.
+	/// </remarks>
+	/// <typeparam name="T">The unmanaged message type.</typeparam>
+	/// <param name="id">Set to the message identifier if successful; otherwise, zero.</param>
+	/// <param name="timeoutMs">Timeout in milliseconds to wait for data.</param>
+	/// <returns>
+	/// A read-only reference to the message data if available; otherwise, a null reference.
+	/// </returns>
+	public unsafe bool TryGetBuffer<T>(out uint id, out T* payloadPtr, uint timeoutMs = 1000)
+		where T : unmanaged
+	{
+		payloadPtr = null;
+		if (!this.Read(out MessageHeader header, out ReadOnlySpan<byte> payloadSpan, timeoutMs))
+		{
+			id = 0;
+			return false;
+		}
+
+		id = header.Id;
+		payloadPtr = (T*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(payloadSpan));
+		return true;
+	}
+
+	/// <summary>
 	/// Reads a header-only message from the shared memory segment.
 	/// </summary>
 	/// <param name="header">The output message header.</param>
@@ -197,13 +235,9 @@ public class Endpoint : Endpoint<MessageHeader>
 public unsafe class Endpoint<TMessageHeader> : IDisposable
 	where TMessageHeader : unmanaged, IMessageHeader
 {
-	protected const int SpinWaitIterations = 100;
+	protected const int SpinWaitIterations = 1000;
 	protected const int SpinWaitDelay = 10;
-	protected const int YieldIterations = 10;
-	protected const int SpinWaitLimit = SpinWaitIterations;
-	protected const int YieldLimit = SpinWaitIterations + YieldIterations;
 
-	private const long CLEANUP_INTERVAL_TICKS = 5 * 10_000_000; // 5 seconds
 	private const uint WAIT_OBJECT_0 = 0x00000000;
 	private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
@@ -215,12 +249,11 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 
 	private IntPtr canReadEvent = IntPtr.Zero;  // Signaled after a write to indicate data is available to read
 	private IntPtr canWriteEvent = IntPtr.Zero; // Signaled after a read to indicate space is available to write
-	
+
 	private RingBuffer<TMessageHeader>? ringBuffer = null;
 	private MemoryMappedFile? mmf = null;
 	private MemoryMappedViewAccessor? accessor = null;
 	private byte* shmPtr = null;
-	private long lastCleanupTimestamp = 0;
 
 	/// <summary>
 	/// Initializes a new instance of the <see cref="Endpoint{TMessageHeader}"/> class.
@@ -313,6 +346,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
 
 		var rb = this.ringBuffer!;
+		var rbHeader = (RingBufferHeader*)this.shmPtr;
 		var readEvent = this.canReadEvent;
 		var writeEvent = this.canWriteEvent;
 
@@ -324,38 +358,35 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 
 			if (rb.Write(header, payload) == OpStatus.Ok)
 			{
-				NativeMethods.SetEvent(readEvent);
+				if (Interlocked.CompareExchange(ref rbHeader->ReaderWaiting, 0, 1) == 1)
+					NativeMethods.SetEvent(readEvent);
+
 				return true;
 			}
 
-			if (i < SpinWaitLimit)
+			if (i < SpinWaitIterations)
 			{
 				Thread.SpinWait(SpinWaitDelay);
 				++i;
+				continue;
 			}
-			else if (i < YieldLimit)
+
+			Interlocked.Exchange(ref rbHeader->WriterWaiting, 1);
+			if (rb.Write(header, payload) == OpStatus.Ok)
 			{
-				Thread.Yield();
-				++i;
+				Interlocked.Exchange(ref rbHeader->WriterWaiting, 0);
+				if (Interlocked.CompareExchange(ref rbHeader->ReaderWaiting, 0, 1) == 1)
+					NativeMethods.SetEvent(readEvent);
+
+				return true;
 			}
-			else
-			{
-				long now = DateTime.UtcNow.Ticks;
-				long last = Interlocked.Read(ref this.lastCleanupTimestamp);
 
-				if (now - last > CLEANUP_INTERVAL_TICKS)
-				{
-					if (Interlocked.CompareExchange(ref this.lastCleanupTimestamp, now, last) == last)
-					{
-						GC.Collect(0, GCCollectionMode.Optimized, blocking: false, compacting: false);
-					}
-				}
+			var waitResult = NativeMethods.WaitForSingleObject(this.canWriteEvent, timeoutMs);
+			Interlocked.Exchange(ref rbHeader->WriterWaiting, 0);
+			if (waitResult != WAIT_OBJECT_0)
+				return false; // Timeout or error
 
-				if (NativeMethods.WaitForSingleObject(writeEvent, timeoutMs) != WAIT_OBJECT_0)
-					return false;
-
-				i = 0;
-			}
+			i = 0; // Reset spin and reattempt
 		}
 	}
 
@@ -376,10 +407,14 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	/// </exception>
 	public bool Read(out TMessageHeader header, out ReadOnlySpan<byte> payload, uint timeoutMs = 1000)
 	{
+		Unsafe.SkipInit(out header);
+		Unsafe.SkipInit(out payload);
+
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
 
 		var rb = this.ringBuffer;
+		var rbHeader = (RingBufferHeader*)this.shmPtr;
 		var readEvent = this.canReadEvent;
 		var writeEvent = this.canWriteEvent;
 
@@ -395,42 +430,39 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 
 			if (rb.Read(out header, out payload) == OpStatus.Ok)
 			{
-				NativeMethods.SetEvent(writeEvent);
+				if (Interlocked.CompareExchange(ref rbHeader->WriterWaiting, 0, 1) == 1)
+					NativeMethods.SetEvent(writeEvent);
+
 				return true;
 			}
 
-			if (i < SpinWaitLimit)
+			if (i < SpinWaitIterations)
 			{
 				Thread.SpinWait(SpinWaitDelay);
 				++i;
+				continue;
 			}
-			else if (i < YieldLimit)
+
+			Interlocked.Exchange(ref rbHeader->ReaderWaiting, 1);
+			if (rb.Read(out header, out payload) == OpStatus.Ok)
 			{
-				Thread.Yield();
-				++i;
+				Interlocked.Exchange(ref rbHeader->ReaderWaiting, 0);
+				if (Interlocked.CompareExchange(ref rbHeader->WriterWaiting, 0, 1) == 1)
+					NativeMethods.SetEvent(writeEvent);
+
+				return true;
 			}
-			else
+
+			var waitResult = NativeMethods.WaitForSingleObject(readEvent, timeoutMs);
+			Interlocked.Exchange(ref rbHeader->ReaderWaiting, 0);
+			if (waitResult != WAIT_OBJECT_0)
 			{
-				long now = DateTime.UtcNow.Ticks;
-				long last = Interlocked.Read(ref this.lastCleanupTimestamp);
-
-				if (now - last > CLEANUP_INTERVAL_TICKS)
-				{
-					if (Interlocked.CompareExchange(ref this.lastCleanupTimestamp, now, last) == last)
-					{
-						GC.Collect(0, GCCollectionMode.Optimized, blocking: false, compacting: false);
-					}
-				}
-
-				if (NativeMethods.WaitForSingleObject(readEvent, timeoutMs) != WAIT_OBJECT_0)
-				{
-					header = default;
-					payload = default;
-					return false;
-				}
-
-				i = 0;
+				header = default;
+				payload = default;
+				return false; // Timeout or error
 			}
+
+			i = 0; // Reset spin and reattempt
 		}
 	}
 
@@ -506,6 +538,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 					BlockSize = this.blockSize,
 					ProducerHead = 0,
 					ConsumerHead = 0,
+					ReaderWaiting = 0,
+					WriterWaiting = 0,
 					Flags = RingBufferFlags.None,
 				};
 				this.accessor.Write(0, ref rbHeader);

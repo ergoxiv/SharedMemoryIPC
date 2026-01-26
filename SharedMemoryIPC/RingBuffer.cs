@@ -119,8 +119,8 @@ public enum RingBufferFlags : uint
 	Shutdown = 1 << 0, // Indicates that the primary endpoint has shut down and no more messages will be processed
 }
 
-[StructLayout(LayoutKind.Explicit, Size = 192, Pack = 8)]
-public unsafe struct RingBufferHeader // 192 bytes
+[StructLayout(LayoutKind.Explicit, Size = 264, Pack = 8)]
+public unsafe struct RingBufferHeader // 264 bytes
 {
 	// Cache line 0: Metadata
 	[FieldOffset(0)]
@@ -142,6 +142,12 @@ public unsafe struct RingBufferHeader // 192 bytes
 	// Cache line 2: ConsumerHead
 	[FieldOffset(128)]
 	public ulong ConsumerHead;     // Offset to the head of the consumer
+
+	[FieldOffset(192)]
+	public int ReaderWaiting;      // Flag indicating if any reader is waiting (0 = IDLE, 1 = WAITING)
+
+	[FieldOffset(256)]
+	public int WriterWaiting;      // Flag indicating if any writer is waiting (0 = IDLE, 1 = WAITING)
 }
 
 // Each control variable consists of 2 parts:
@@ -369,7 +375,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
 				+ BlockHeaderSize * this.GetBlockIdx(pHead));
 			byte* blockPtr = this.blkPayloadStartPtr
-				+ this.GetBlockIdx(pHead) * this.rbHeaderPtr->BlockSize;
+				+ this.GetBlockIdx(pHead) * this.blockSize;
 			var entry = new EntryDesc(blockHdrPtr, blockPtr, msgHeader, payload);
 			State state = this.AllocateEntry(ref entry);
 			switch (state)
@@ -422,7 +428,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
 				+ BlockHeaderSize * this.GetBlockIdx(cHead));
 			byte* blockPtr = this.blkPayloadStartPtr
-				+ this.GetBlockIdx(cHead) * this.rbHeaderPtr->BlockSize;
+				+ this.GetBlockIdx(cHead) * this.blockSize;
 			var entry = new EntryDesc(blockHdrPtr, blockPtr);
 			State state = this.ReserveEntry(ref entry);
 			switch (state)
@@ -516,21 +522,20 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private ulong PkgCursor(ulong off, ulong vsn) => (off & this.offMask) | ((vsn << this.offBits) & (this.vsnMask << this.offBits));
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	private static ulong AtomicMax(ref ulong var, ulong newVal)
+	private static ulong AtomicMax(ref ulong location, ulong newVal)
 	{
-		ulong oldVal = Interlocked.Read(ref var);
+		ulong oldVal = Volatile.Read(ref location);
+
 		if (oldVal >= newVal)
 			return oldVal;
 
 		while (oldVal < newVal)
 		{
-			ulong prev = Interlocked.CompareExchange(ref var, newVal, oldVal);
+			ulong prev = Interlocked.CompareExchange(ref location, newVal, oldVal);
 			if (prev == oldVal)
-				break;
+				return newVal;
 
 			oldVal = prev;
-			if (oldVal >= newVal)
-				break;
 		}
 
 		return oldVal;
@@ -557,10 +562,10 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		{
 			*(BlockHeader*)ptr = new BlockHeader
 			{
-				Allocated = this.PkgCursor(this.rbHeaderPtr->BlockSize, 0),
-				Committed = this.PkgCursor(this.rbHeaderPtr->BlockSize, 0),
-				Reserved = this.PkgCursor(this.rbHeaderPtr->BlockSize, 0),
-				Consumed = this.PkgCursor(this.rbHeaderPtr->BlockSize, 0),
+				Allocated = this.PkgCursor(this.blockSize, 0),
+				Committed = this.PkgCursor(this.blockSize, 0),
+				Reserved = this.PkgCursor(this.blockSize, 0),
+				Consumed = this.PkgCursor(this.blockSize, 0),
 			};
 
 			ptr += BlockHeaderSize;
@@ -570,7 +575,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private void SetMessageRegionToDefault()
 	{
 		// Set the message region to zero
-		Unsafe.InitBlockUnaligned(this.blkPayloadStartPtr, 0, (uint)this.rbHeaderPtr->BlockSize * this.rbHeaderPtr->BlockCount);
+		Unsafe.InitBlockUnaligned(this.blkPayloadStartPtr, 0, (uint)this.blockSize * this.rbHeaderPtr->BlockCount);
 	}
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -624,15 +629,9 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		// Write the message payload if it exists
 		if (entry.MsgHeader.Length > 0 && !entry.MsgPayload.IsEmpty)
 		{
-			fixed (byte* src = entry.MsgPayload)
-			{
-				Buffer.MemoryCopy(
-					src,
-					entry.BlockPayload + entry.Offset + MessageHeaderSize,
-					entry.MsgHeader.Length,
-					entry.MsgHeader.Length
-				);
-			}
+			ref byte src = ref MemoryMarshal.GetReference(entry.MsgPayload);
+			ref byte dst = ref *(entry.BlockPayload + entry.Offset + MessageHeaderSize);
+			Unsafe.CopyBlockUnaligned(ref dst, ref src, (uint)entry.MsgHeader.Length);
 		}
 
 		// Update the committed cursor
@@ -729,10 +728,10 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	{
 		ulong nextIdx = (this.GetBlockIdx(cHead) + 1) % this.blockCount;
 		ulong cHeadVsn = this.GetBlockVsn(cHead);
-		ulong nextVsn = this.GetBlockVsn(cHead) + ((nextIdx == 0) ? 1UL : 0UL);
+		ulong nextVsn = cHeadVsn + ((nextIdx == 0) ? 1UL : 0UL);
 		BlockHeader* nextBlkHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
 
-		ulong committed = Interlocked.Read(ref nextBlkHdrPtr->Committed);
+		ulong committed = Volatile.Read(ref nextBlkHdrPtr->Committed);
 
 		// Only advance the consumer head if the next block is fully committed
 		if (this.GetCursorVsn(committed) != cHeadVsn + 1)

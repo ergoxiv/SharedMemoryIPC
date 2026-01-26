@@ -17,6 +17,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace SharedMemoryIPC;
@@ -43,6 +44,7 @@ public static class Benchmark
 	const uint BlockCount = 128;
 	const ulong BlockSize = 8192;
 	const int MessageCount = 1_000_000;
+	const int IpcTimeoutMs = 1000;
 	const int LatencySampleRate = 1000;
 	const int LatencySampleCount = MessageCount / LatencySampleRate;
 
@@ -56,10 +58,10 @@ public static class Benchmark
 		int received = 0;
 		while (received < MessageCount)
 		{
-			if (endpointC2S.Read<BenchmarkPayload>(out uint id, out var payload, 1000))
+			ref readonly var payload = ref endpointC2S.ReadDirect<BenchmarkPayload>(out uint id, IpcTimeoutMs);
+			if (!Unsafe.IsNullRef(in payload))
 			{
-				// Echo back with server's sender ID
-				endpointS2C.Write(id, payload, 1000);
+				endpointS2C.Write(id, in payload, IpcTimeoutMs);
 				received++;
 			}
 		}
@@ -86,9 +88,9 @@ public static class Benchmark
 				Sequence = i,
 			};
 
-			endpointC2S.Write(i, payload, 1000);
+			endpointC2S.Write(i, payload, IpcTimeoutMs);
 
-			if (endpointS2C.Read<BenchmarkPayload>(out uint id, out var reply, 1000))
+			if (endpointS2C.Read<BenchmarkPayload>(out uint id, out var reply, IpcTimeoutMs))
 			{
 				successful++;
 
