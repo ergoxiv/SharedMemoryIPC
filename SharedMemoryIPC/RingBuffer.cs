@@ -63,6 +63,7 @@ public enum PayloadType : byte
 	Blob = 30, // Arbitrary binary data; Intended for sending unmanaged structs or serialized objects
 
 	// Special types
+	Command = 0x71,        // Command; Optional payload (e.g., command invocation)
 	Config = 0x72,         // Configure; Optional payload (e.g., config data)
 	Event = 0x73,          // Event/notification; Optional payload (e.g., event data)
 	Request = 0x74,        // Request; Optional payload (e.g., request parameters)
