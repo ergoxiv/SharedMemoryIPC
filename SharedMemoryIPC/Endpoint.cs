@@ -384,6 +384,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			if (rb.Write(header, payload) == OpStatus.Ok)
 			{
 				Interlocked.Exchange(ref rbHeader->WriterWaiting, 0);
+				NativeMethods.ResetEvent(writeEvent);
+
 				if (Interlocked.CompareExchange(ref rbHeader->ReaderWaiting, 0, 1) == 1)
 					NativeMethods.SetEvent(readEvent);
 
@@ -456,6 +458,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			if (rb.Read(out header, out payload) == OpStatus.Ok)
 			{
 				Interlocked.Exchange(ref rbHeader->ReaderWaiting, 0);
+				NativeMethods.ResetEvent(readEvent);
+
 				if (Interlocked.CompareExchange(ref rbHeader->WriterWaiting, 0, 1) == 1)
 					NativeMethods.SetEvent(writeEvent);
 

@@ -33,6 +33,11 @@ public static partial class NativeMethods
 	public static partial bool SetEvent(IntPtr hEvent);
 
 	[LibraryImport("kernel32.dll", SetLastError = false)]
+	[SuppressGCTransition]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	public static partial bool ResetEvent(IntPtr hEvent);
+
+	[LibraryImport("kernel32.dll", SetLastError = false)]
 	internal static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
 	[LibraryImport("kernel32.dll", SetLastError = false)]
