@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2025  ergoxiv <ergo.ffxiv@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
@@ -61,8 +61,8 @@ public class Endpoint : Endpoint<MessageHeader>
 	}
 
 	/// <inheritdoc/>
-	public Endpoint(string shmFilename, uint blockCount, ulong blockSize)
-		: base(shmFilename, blockCount, blockSize)
+	public Endpoint(string shmFilename, uint blockCount, ulong blockSize, RingBufferMode mode = RingBufferMode.Spsc)
+		: base(shmFilename, blockCount, blockSize, mode)
 	{
 	}
 
@@ -245,12 +245,13 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	private ulong sharedMemorySize;
 	private uint blockCount;
 	private ulong blockSize;
+	private RingBufferMode mode;
 	private bool disposedValue;
 
 	private IntPtr canReadEvent = IntPtr.Zero;  // Signaled after a write to indicate data is available to read
 	private IntPtr canWriteEvent = IntPtr.Zero; // Signaled after a read to indicate space is available to write
 
-	private RingBuffer<TMessageHeader>? ringBuffer = null;
+	private IRingBuffer<TMessageHeader>? ringBuffer = null;
 	private MemoryMappedFile? mmf = null;
 	private MemoryMappedViewAccessor? accessor = null;
 	private byte* shmPtr = null;
@@ -263,7 +264,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	/// <param name="shmFilename">The name of the shared memory segment.</param>
 	/// <param name="blockCount">The number of blocks in the ring buffer.</param>
 	/// <param name="blockSize">The size of each block in bytes.</param>
-	public Endpoint(string shmFilename, uint blockCount, ulong blockSize)
+	/// <param name="mode">The ring buffer mode (SPSC or MPMC). Defaults to MPMC.</param>
+	public Endpoint(string shmFilename, uint blockCount, ulong blockSize, RingBufferMode mode = RingBufferMode.Mpmc)
 	{
 		ArgumentException.ThrowIfNullOrEmpty(shmFilename, nameof(shmFilename));
 		ArgumentOutOfRangeException.ThrowIfZero(blockCount, nameof(blockCount));
@@ -276,7 +278,13 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		this.desiredShmOwner = true;
 		this.blockCount = blockCount;
 		this.blockSize = blockSize;
-		this.sharedMemorySize = (ulong)Marshal.SizeOf<RingBufferHeader>() + blockCount * ((ulong)Marshal.SizeOf<BlockHeader>() + blockSize);
+		this.mode = mode;
+		ulong blockHeaderSize = mode switch
+		{
+			RingBufferMode.Spsc => (ulong)Marshal.SizeOf<SpscBlockHeader>(),
+			_ => (ulong)Marshal.SizeOf<MpmcBlockHeader>()
+		};
+		this.sharedMemorySize = (ulong)Marshal.SizeOf<RingBufferHeader>() + blockCount * (blockHeaderSize + blockSize);
 
 		this.OpenMemoryMappedFile();
 	}
@@ -295,6 +303,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		this.desiredShmOwner = false;
 		this.blockCount = 0;
 		this.blockSize = 0;
+		this.mode = RingBufferMode.Mpmc;
 		this.sharedMemorySize = 0;
 
 		this.OpenMemoryMappedFile();
@@ -541,9 +550,14 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 					ReaderWaiting = 0,
 					WriterWaiting = 0,
 					Flags = RingBufferFlags.None,
+					Mode = this.mode,
 				};
 				this.accessor.Write(0, ref rbHeader);
-				this.ringBuffer = new RingBuffer<TMessageHeader>(this.shmPtr, this.blockCount, this.blockSize, isTrueOwner);
+				this.ringBuffer = this.mode switch
+				{
+					RingBufferMode.Spsc => new SpscRingBuffer<TMessageHeader>(this.shmPtr, this.blockCount, this.blockSize, isTrueOwner),
+					_ => new MpmcRingBuffer<TMessageHeader>(this.shmPtr, this.blockCount, this.blockSize, isTrueOwner)
+				};
 			}
 			else
 			{
@@ -555,6 +569,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 					this.sharedMemorySize = header->SharedMemorySize;
 					this.blockCount = header->BlockCount;
 					this.blockSize = header->BlockSize;
+					this.mode = header->Mode;
 					headerView.SafeMemoryMappedViewHandle.ReleasePointer();
 				}
 
@@ -564,7 +579,11 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				if (this.shmPtr == null)
 					throw new InvalidOperationException("Failed to acquire pointer to shared memory.");
 
-				this.ringBuffer = new RingBuffer<TMessageHeader>(this.shmPtr, this.blockCount, this.blockSize, isTrueOwner);
+				this.ringBuffer = this.mode switch
+				{
+					RingBufferMode.Spsc => new SpscRingBuffer<TMessageHeader>(this.shmPtr, this.blockCount, this.blockSize, isTrueOwner),
+					_ => new MpmcRingBuffer<TMessageHeader>(this.shmPtr, this.blockCount, this.blockSize, isTrueOwner)
+				};
 			}
 
 			// Create the sync events

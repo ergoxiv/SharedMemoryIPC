@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2025  ergoxiv <ergo.ffxiv@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
@@ -20,146 +20,12 @@ using System.Threading;
 
 namespace SharedMemoryIPC;
 
-public enum OpStatus : byte
-{
-	Ok = 0,
-	Busy = 1,
-	Empty = 2,
-	Full = 3,
-	Error = 4,
-}
-
-public enum PayloadType : byte
-{
-	Invalid = 0, // No payload; Used for dummy entries to pad the ring buffer blocks
-	Bit = 1,
-	Int8 = 2,
-	UInt8 = 3,
-	Int16 = 4,
-	UInt16 = 5,
-	Int20 = 6,
-	UInt20 = 7,
-	Int24 = 8,
-	UInt24 = 9,
-	Int32 = 10,
-	UInt32 = 11,
-	Int40 = 12,
-	UInt40 = 13,
-	Int48 = 14,
-	UInt48 = 15,
-	Int56 = 16,
-	UInt56 = 17,
-	Int64 = 18,
-	UInt64 = 19,
-	Float16 = 20, // Half (IEEE 754, bfloat16)
-	Float32 = 21, // Single (IEEE 754)
-	Float64 = 22, // Double (IEEE 754)
-	Float128 = 23, // Quadriple (IEEE 754)
-	Float256 = 24, // Octuple (IEEE 754)
-	AsciiString = 25,
-	UTF8String = 26,
-	UTF16String = 27,
-	Guid = 28, // 128-bit globally unique identifier
-	Blob = 30, // Arbitrary binary data; Intended for sending unmanaged structs or serialized objects
-
-	// Special types
-	Command = 0x71,        // Command; Optional payload (e.g., command invocation)
-	Config = 0x72,         // Configure; Optional payload (e.g., config data)
-	Event = 0x73,          // Event/notification; Optional payload (e.g., event data)
-	Request = 0x74,        // Request; Optional payload (e.g., request parameters)
-	Heartbeat = 0x75,      // Heartbeat; No payload
-	Retry = 0x76,          // Retry; No payload
-	Error = 0x77,          // Error; Optional payload (e.g., error message)
-	Syn = 0x78,            // Synchronization; Optional payload (e.g., timestamp)
-	Fin = 0x79,            // Finish/close connection; No payload
-	Rst = 0x7A,            // Reset connection; No payload
-	EventSubscribe = 0x7B, // Event subscription; Optional payload (e.g., event identifier)
-	Register = 0x7C,       // Register; Optional payload (e.g., registration info)
-	Hello = 0x7D,          // Hello; No payload
-	Ack = 0x7E,            // Acknowledgment; No payload
-	NoPayload = 0x7F,      // No payload; Used for signaling or notifications
-
-	// NOTE: Limit to 127 maximum allowed types.
-	// [!] The last bit is reserved to mark payload as single object (0)/object array (1).
-	BitArray = Bit | 0x80,
-	Int8Array = Int8 | 0x80,
-	UInt8Array = UInt8 | 0x80,
-	Int16Array = Int16 | 0x80,
-	UInt16Array = UInt16 | 0x80,
-	Int20Array = Int20 | 0x80,
-	UInt20Array = UInt20 | 0x80,
-	Int24Array = Int24 | 0x80,
-	UInt24Array = UInt24 | 0x80,
-	Int32Array = Int32 | 0x80,
-	UInt32Array = UInt32 | 0x80,
-	Int40Array = Int40 | 0x80,
-	UInt40Array = UInt40 | 0x80,
-	Int48Array = Int48 | 0x80,
-	UInt48Array = UInt48 | 0x80,
-	Int56Array = Int56 | 0x80,
-	UInt56Array = UInt56 | 0x80,
-	Int64Array = Int64 | 0x80,
-	UInt64Array = UInt64 | 0x80,
-	Float16Array = Float16 | 0x80,
-	Float32Array = Float32 | 0x80,
-	Float64Array = Float64 | 0x80,
-	Float128Array = Float128 | 0x80,
-	Float256Array = Float256 | 0x80,
-	AsciiStringArray = AsciiString | 0x80, // Intended for ASCII strings split by null terminators
-	UTF8StringArray = UTF8String | 0x80,   // Intended for UTF-8 strings split by null terminators
-	UTF16StringArray = UTF16String | 0x80, // Intended for UTF-16 strings split by null terminators
-	GuidArray = Guid | 0x80,
-	BlobArray = Blob | 0x80,
-
-	EventUnsubscribe = 0xFB, // Event unsubscription; Optional payload (e.g., event identifier)
-	Unregister = 0xFC,       // Unregister; Optional payload (e.g., unregistration info)
-	Bye = 0xFD,              // Goodbye; No payload
-	NAck = 0xFE,             // Negative acknowledgment; No payload
-}
-
-public enum RingBufferFlags : uint
-{
-	None = 0,
-	Shutdown = 1 << 0, // Indicates that the primary endpoint has shut down and no more messages will be processed
-}
-
-[StructLayout(LayoutKind.Explicit, Size = 264, Pack = 8)]
-public unsafe struct RingBufferHeader // 264 bytes
-{
-	// Cache line 0: Metadata
-	[FieldOffset(0)]
-	public ulong SharedMemorySize; // Total size of the shared memory segment
-
-	[FieldOffset(8)]
-	public uint BlockCount;        // The number of blocks in the ring buffer
-
-	[FieldOffset(16)]
-	public ulong BlockSize;        // The size of each block in bytes
-
-	[FieldOffset(24)]
-	public RingBufferFlags Flags;  // Bit flags for various states (e.g., shutdown)
-
-	// Cache line 1: ProducerHead
-	[FieldOffset(64)]
-	public ulong ProducerHead;     // Offset to the head of the producer
-
-	// Cache line 2: ConsumerHead
-	[FieldOffset(128)]
-	public ulong ConsumerHead;     // Offset to the head of the consumer
-
-	[FieldOffset(192)]
-	public int ReaderWaiting;      // Flag indicating if any reader is waiting (0 = IDLE, 1 = WAITING)
-
-	[FieldOffset(256)]
-	public int WriterWaiting;      // Flag indicating if any writer is waiting (0 = IDLE, 1 = WAITING)
-}
-
 // Each control variable consists of 2 parts:
 // (1a) Index:   The block (0 to N-1) the pointer is currently pointing to.
 // (1b) Offset:  The byte offset within a block.
 // (2)  Version: Distinguishes between cycles through the ring buffer.
 [StructLayout(LayoutKind.Explicit, Size = 256, Pack = 64)]
-public unsafe struct BlockHeader // 256 bytes
+public unsafe struct MpmcBlockHeader // 256 bytes
 {
 	[FieldOffset(0)]
 	public ulong Allocated;
@@ -174,62 +40,9 @@ public unsafe struct BlockHeader // 256 bytes
 	public ulong Consumed;
 }
 
-/// <summary>
-/// An interface for defining message headers used in the ring buffer.
-/// </summary>
-public interface IMessageHeader
-{
-	/// <summary>
-	/// Gets or sets the type of payload represented by this instance.
-	/// </summary>
-	PayloadType Type { get; set; }
-
-	/// <summary>
-	/// Gets or sets the total length, in bytes, of the data or stream.
-	/// </summary>
-	ulong Length { get; set; }
-}
-
-/// <summary>
-/// The standard message header for messages in the ring buffer.
-/// You can define your own message header to better suit your
-/// use case by creating a struct that implements <see cref="IMessageHeader"/>.
-/// </summary>
-/// <param name="id">
-/// The user-defined message identifier.
-/// </param>
-/// <param name="type">
-/// The type of the message payload.
-/// </param>
-/// <param name="length">
-/// The length of the message payload in bytes.
-/// </param>
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public unsafe struct MessageHeader(uint id = 0, PayloadType type = PayloadType.Invalid, ulong length = 0) : IMessageHeader // 16 bytes
-{
-	public uint Id = id;              // User-defined message identifier
-	private PayloadType _type = type; // Type of the message payload
-	private fixed byte _reserved[3];  // Padding to make the struct 16 bytes
-	private ulong _length = length;   // Length of the message payload
-
-	/// <inheritdoc/>
-	public PayloadType Type
-	{
-		readonly get => this._type;
-		set => this._type = value;
-	}
-
-	/// <inheritdoc/>
-	public ulong Length
-	{
-		readonly get => this._length;
-		set => this._length = value;
-	}
-}
-
 // Wrapper for the default message header
-public unsafe class RingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, bool isShmemOwner)
-	: RingBuffer<MessageHeader>(shmPtr, blockCount, blockSize, isShmemOwner)
+public unsafe class MpmcRingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, bool isShmemOwner)
+	: MpmcRingBuffer<MessageHeader>(shmPtr, blockCount, blockSize, isShmemOwner)
 {
 }
 
@@ -239,7 +52,7 @@ public unsafe class RingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, b
 /// <remarks>
 /// <para>The shared memory layout is:<br/><br/>
 /// <code>
-/// | RingBufferHeader | BlockHeader[0] | ... | BlockHeader[N-1] | Block[0] | ... | Block[N-1] |<br/>
+/// | RingBufferHeader | MpmcBlockHeader[0] | ... | MpmcBlockHeader[N-1] | Block[0] | ... | Block[N-1] |<br/>
 /// |                  |                                         | variable |     |  variable  |<br/>
 /// |     64 bytes     |            32 bytes each * N            |------- variable * N  -------|<br/>
 /// |--------------------------- Headers ------------------------|-------- Message data -------|<br/>
@@ -247,7 +60,7 @@ public unsafe class RingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, b
 /// </code>
 /// </para>
 /// </remarks>
-public unsafe class RingBuffer<TMessageHeader> : IDisposable
+public unsafe class MpmcRingBuffer<TMessageHeader> : IRingBuffer<TMessageHeader>
 	where TMessageHeader : unmanaged, IMessageHeader
 {
 	// Design notes:
@@ -269,7 +82,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private const ulong MaxBlockSize = (1UL << MaxBlockSizeBits) - 1;
 
 	private static readonly ulong RingBufferHeaderSize = (ulong)sizeof(RingBufferHeader);
-	private static readonly ulong BlockHeaderSize = (ulong)sizeof(BlockHeader);
+	private static readonly ulong BlockHeaderSize = (ulong)sizeof(MpmcBlockHeader);
 	private static readonly ulong MessageHeaderSize = (ulong)sizeof(TMessageHeader);
 
 	private byte* shmPtr;
@@ -290,7 +103,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	private bool disposedValue;
 
 	/// <summary>
-	/// Initializes a new instance of the <see cref="RingBuffer{TMessageHeader}"/> class.
+	/// Initializes a new instance of the <see cref="MpmcRingBuffer{TMessageHeader}"/> class.
 	/// </summary>
 	/// <param name="shmPtr">The pointer to the start of the shared memory segment.</param>
 	/// <param name="blockCount">The number of blocks in the ring buffer.</param>
@@ -302,7 +115,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	/// <exception cref="ArgumentOutOfRangeException">
 	/// Thrown if <paramref name="blockSize"/> exceeds the maximum allowed size.
 	/// </exception>
-	public RingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, bool isShmemOwner)
+	public MpmcRingBuffer(byte* shmPtr, uint blockCount, ulong blockSize, bool isShmemOwner)
 	{
 		ArgumentNullException.ThrowIfNull(shmPtr);
 
@@ -338,7 +151,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		}
 	}
 
-	~RingBuffer()
+	~MpmcRingBuffer()
 	{
 		this.Dispose(false);
 	}
@@ -352,22 +165,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		GC.SuppressFinalize(this);
 	}
 
-	/// <summary>
-	/// Attempts to enqueue a message into the ring buffer.
-	/// </summary>
-	/// <param name="msgHeader">
-	/// The message header containing metadata about the message.
-	/// </param>
-	/// <param name="payload">
-	/// The payload of the message.
-	/// </param>
-	/// <returns>
-	/// The operation status indicating the result of the write attempt.
-	/// </returns>
-	/// <remarks>
-	/// It is the responsibility of the caller to ensure that the message
-	/// header and payload are correctly prepared before calling this method.
-	/// </remarks>
+	/// <inheritdoc/>
 	public OpStatus Write(TMessageHeader msgHeader, ReadOnlySpan<byte> payload = default)
 	{
 		if ((this.rbHeaderPtr->Flags & RingBufferFlags.Shutdown) != 0)
@@ -380,7 +178,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		for (; ; )
 		{
 			ulong pHead = Volatile.Read(ref this.rbHeaderPtr->ProducerHead);
-			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
+			MpmcBlockHeader* blockHdrPtr = (MpmcBlockHeader*)(this.blkHeaderStartPtr
 				+ BlockHeaderSize * this.GetBlockIdx(pHead));
 			byte* blockPtr = this.blkPayloadStartPtr
 				+ this.GetBlockIdx(pHead) * this.blockSize;
@@ -409,18 +207,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		}
 	}
 
-	/// <summary>
-	/// Attempts to dequeue the next available message from the ring buffer.
-	/// </summary>
-	/// <param name="msgHeader">
-	/// Output parameter to store the message header of the dequeued message.
-	/// </param>
-	/// <param name="payload">
-	/// Output parameter to store the payload of the dequeued message.
-	/// </param>
-	/// <returns>
-	/// The operation status indicating the result of the read attempt.
-	/// </returns>
+	/// <inheritdoc/>
 	public OpStatus Read(out TMessageHeader msgHeader, out ReadOnlySpan<byte> payload)
 	{
 		if ((this.rbHeaderPtr->Flags & RingBufferFlags.Shutdown) != 0)
@@ -433,7 +220,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		for (; ; )
 		{
 			ulong cHead = Volatile.Read(ref this.rbHeaderPtr->ConsumerHead);
-			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
+			MpmcBlockHeader* blockHdrPtr = (MpmcBlockHeader*)(this.blkHeaderStartPtr
 				+ BlockHeaderSize * this.GetBlockIdx(cHead));
 			byte* blockPtr = this.blkPayloadStartPtr
 				+ this.GetBlockIdx(cHead) * this.blockSize;
@@ -492,11 +279,11 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		this.disposedValue = true;
 	}
 
-	private ref struct EntryDesc(BlockHeader* blkHeader, byte* blkPayload, TMessageHeader msgHeader = default, ReadOnlySpan<byte> msgPayload = default)
+	private ref struct EntryDesc(MpmcBlockHeader* blkHeader, byte* blkPayload, TMessageHeader msgHeader = default, ReadOnlySpan<byte> msgPayload = default)
 	{
 		public TMessageHeader MsgHeader = msgHeader;
 		public ReadOnlySpan<byte> MsgPayload = msgPayload;
-		public BlockHeader* BlockHeader = blkHeader;
+		public MpmcBlockHeader* BlockHeader = blkHeader;
 		public byte* BlockPayload = blkPayload;
 		public ulong Offset = 0;
 	}
@@ -555,7 +342,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		byte* endPtr = ptr + BlockHeaderSize * this.rbHeaderPtr->BlockCount;
 
 		// Set all control variables to zero for the first block
-		*(BlockHeader*)ptr = new BlockHeader
+		*(MpmcBlockHeader*)ptr = new MpmcBlockHeader
 		{
 			Allocated = 0,
 			Committed = 0,
@@ -568,7 +355,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		// Set all control variables to block size for the remaining blocks
 		while (ptr < endPtr)
 		{
-			*(BlockHeader*)ptr = new BlockHeader
+			*(MpmcBlockHeader*)ptr = new MpmcBlockHeader
 			{
 				Allocated = this.PkgCursor(this.blockSize, 0),
 				Committed = this.PkgCursor(this.blockSize, 0),
@@ -652,7 +439,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		ulong nextIdx = (this.GetBlockIdx(pHead) + 1) % this.blockCount;
 		ulong pHeadVsn = this.GetBlockVsn(pHead);
 		ulong nextVsn = pHeadVsn + ((nextIdx == 0) ? 1UL : 0UL);
-		BlockHeader* nextBlkHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
+		MpmcBlockHeader* nextBlkHdrPtr = (MpmcBlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
 
 		// Check if the next block is available (i.e., fully consumed)
 		ulong consumed = Volatile.Read(ref nextBlkHdrPtr->Consumed);
@@ -737,7 +524,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		ulong nextIdx = (this.GetBlockIdx(cHead) + 1) % this.blockCount;
 		ulong cHeadVsn = this.GetBlockVsn(cHead);
 		ulong nextVsn = cHeadVsn + ((nextIdx == 0) ? 1UL : 0UL);
-		BlockHeader* nextBlkHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
+		MpmcBlockHeader* nextBlkHdrPtr = (MpmcBlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
 
 		ulong committed = Volatile.Read(ref nextBlkHdrPtr->Committed);
 

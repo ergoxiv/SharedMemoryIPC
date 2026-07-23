@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2025  ergoxiv <ergo.ffxiv@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
@@ -53,8 +53,8 @@ public static class Benchmark
 	/// </summary>
 	public static void RunServer()
 	{
-		using var endpointC2S = new Endpoint(ShmNameC2S, BlockCount, BlockSize);
-		using var endpointS2C = new Endpoint(ShmNameS2C, BlockCount, BlockSize);
+		using var endpointC2S = new Endpoint(ShmNameC2S, BlockCount, BlockSize, RingBufferMode.Spsc);
+		using var endpointS2C = new Endpoint(ShmNameS2C, BlockCount, BlockSize, RingBufferMode.Spsc);
 		int received = 0;
 		while (received < MessageCount)
 		{
