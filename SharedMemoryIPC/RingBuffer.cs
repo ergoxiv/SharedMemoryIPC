@@ -379,7 +379,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 
 		for (; ; )
 		{
-			ulong pHead = Interlocked.Read(ref this.rbHeaderPtr->ProducerHead);
+			ulong pHead = Volatile.Read(ref this.rbHeaderPtr->ProducerHead);
 			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
 				+ BlockHeaderSize * this.GetBlockIdx(pHead));
 			byte* blockPtr = this.blkPayloadStartPtr
@@ -432,7 +432,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 
 		for (; ; )
 		{
-			ulong cHead = Interlocked.Read(ref this.rbHeaderPtr->ConsumerHead);
+			ulong cHead = Volatile.Read(ref this.rbHeaderPtr->ConsumerHead);
 			BlockHeader* blockHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr
 				+ BlockHeaderSize * this.GetBlockIdx(cHead));
 			byte* blockPtr = this.blkPayloadStartPtr
@@ -589,7 +589,7 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private State AllocateEntry(ref EntryDesc entry)
 	{
-		ulong allocated = Interlocked.Read(ref entry.BlockHeader->Allocated);
+		ulong allocated = Volatile.Read(ref entry.BlockHeader->Allocated);
 		ulong entrySize = MessageHeaderSize + entry.MsgHeader.Length;
 		ulong allocatedOff = this.GetCursorOff(allocated);
 		ulong endCursor = this.PkgCursor(this.blockSize, this.GetCursorVsn(allocated));
@@ -655,11 +655,11 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 		BlockHeader* nextBlkHdrPtr = (BlockHeader*)(this.blkHeaderStartPtr + BlockHeaderSize * nextIdx);
 
 		// Check if the next block is available (i.e., fully consumed)
-		ulong consumed = Interlocked.Read(ref nextBlkHdrPtr->Consumed);
+		ulong consumed = Volatile.Read(ref nextBlkHdrPtr->Consumed);
 		if (this.GetCursorVsn(consumed) < pHeadVsn ||
 			(this.GetCursorVsn(consumed) == pHeadVsn && this.GetCursorOff(consumed) != this.blockSize))
 		{
-			ulong reserved = Interlocked.Read(ref nextBlkHdrPtr->Reserved);
+			ulong reserved = Volatile.Read(ref nextBlkHdrPtr->Reserved);
 			return this.GetCursorOff(reserved) == this.GetCursorOff(consumed) ? State.NoEntry : State.NotAvailable;
 		}
 
@@ -675,18 +675,18 @@ public unsafe class RingBuffer<TMessageHeader> : IDisposable
 	{
 		for (; ; )
 		{
-			ulong reserved = Interlocked.Read(ref entry.BlockHeader->Reserved);
+			ulong reserved = Volatile.Read(ref entry.BlockHeader->Reserved);
 			ulong reservedOff = this.GetCursorOff(reserved);
 
 			if (reservedOff + MessageHeaderSize <= this.blockSize)
 			{
-				ulong committed = Interlocked.Read(ref entry.BlockHeader->Committed);
+				ulong committed = Volatile.Read(ref entry.BlockHeader->Committed);
 				if (reservedOff == this.GetCursorOff(committed))
 					return State.NoEntry;
 
 				if (this.GetCursorOff(committed) < this.blockSize)
 				{
-					ulong allocated = Interlocked.Read(ref entry.BlockHeader->Allocated);
+					ulong allocated = Volatile.Read(ref entry.BlockHeader->Allocated);
 					if (this.GetCursorOff(allocated) != this.GetCursorOff(committed))
 						return State.NotAvailable;
 				}
