@@ -345,8 +345,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 	/// </exception>
 	public bool Write(TMessageHeader header, ReadOnlySpan<byte> payload, uint timeoutMs = 1000)
 	{
-		if ((ulong)payload.Length > this.blockSize)
-			throw new ArgumentOutOfRangeException(nameof(payload), "Payload size exceeds block size.");
+		if ((ulong)payload.Length + (ulong)sizeof(TMessageHeader) > this.blockSize)
+			throw new ArgumentOutOfRangeException(nameof(payload), $"Payload size ({payload.Length} bytes) plus header size ({sizeof(TMessageHeader)} bytes) exceeds block size ({this.blockSize} bytes).");
 
 		if (timeoutMs <= 0)
 			throw new ArgumentException("Timeout must be greater than zero.", nameof(timeoutMs));
@@ -362,7 +362,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			if (rb == null)
 				return false;
 
-			if (rb.Write(header, payload) == OpStatus.Ok)
+			OpStatus status = rb.Write(header, payload);
+			if (status == OpStatus.Ok)
 			{
 				if (Interlocked.CompareExchange(ref rbHeader->ReaderWaiting, 0, 1) == 1)
 					NativeMethods.SetEvent(readEvent);
@@ -374,7 +375,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				continue;
 
 			Interlocked.Exchange(ref rbHeader->WriterWaiting, 1);
-			if (rb.Write(header, payload) == OpStatus.Ok)
+			status = rb.Write(header, payload);
+			if (status == OpStatus.Ok)
 			{
 				Interlocked.Exchange(ref rbHeader->WriterWaiting, 0);
 				NativeMethods.ResetEvent(writeEvent);
@@ -432,7 +434,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				return false;
 			}
 
-			if (rb.Read(out header, out payload) == OpStatus.Ok)
+			OpStatus status = rb.Read(out header, out payload);
+			if (status == OpStatus.Ok)
 			{
 				if (Interlocked.CompareExchange(ref rbHeader->WriterWaiting, 0, 1) == 1)
 					NativeMethods.SetEvent(writeEvent);
@@ -444,7 +447,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				continue;
 
 			Interlocked.Exchange(ref rbHeader->ReaderWaiting, 1);
-			if (rb.Read(out header, out payload) == OpStatus.Ok)
+			status = rb.Read(out header, out payload);
+			if (status == OpStatus.Ok)
 			{
 				Interlocked.Exchange(ref rbHeader->ReaderWaiting, 0);
 				NativeMethods.ResetEvent(readEvent);
