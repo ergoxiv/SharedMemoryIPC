@@ -235,9 +235,6 @@ public class Endpoint : Endpoint<MessageHeader>
 public unsafe class Endpoint<TMessageHeader> : IDisposable
 	where TMessageHeader : unmanaged, IMessageHeader
 {
-	protected const int SpinWaitIterations = 1000;
-	protected const int SpinWaitDelay = 10;
-
 	private const uint WAIT_OBJECT_0 = 0x00000000;
 	private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
@@ -358,8 +355,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		var rbHeader = (RingBufferHeader*)this.shmPtr;
 		var readEvent = this.canReadEvent;
 		var writeEvent = this.canWriteEvent;
+		var backoff = new IpcBackoff();
 
-		int i = 0;
 		for (; ; )
 		{
 			if (rb == null)
@@ -373,12 +370,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				return true;
 			}
 
-			if (i < SpinWaitIterations)
-			{
-				Thread.SpinWait(SpinWaitDelay);
-				++i;
+			if (backoff.Step())
 				continue;
-			}
 
 			Interlocked.Exchange(ref rbHeader->WriterWaiting, 1);
 			if (rb.Write(header, payload) == OpStatus.Ok)
@@ -397,7 +390,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 			if (waitResult != WAIT_OBJECT_0)
 				return false; // Timeout or error
 
-			i = 0; // Reset spin and reattempt
+			backoff.Reset(); // Reset backoff after kernel wake
 		}
 	}
 
@@ -428,8 +421,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 		var rbHeader = (RingBufferHeader*)this.shmPtr;
 		var readEvent = this.canReadEvent;
 		var writeEvent = this.canWriteEvent;
+		var backoff = new IpcBackoff();
 
-		int i = 0;
 		for (; ; )
 		{
 			if (rb == null)
@@ -447,12 +440,8 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				return true;
 			}
 
-			if (i < SpinWaitIterations)
-			{
-				Thread.SpinWait(SpinWaitDelay);
-				++i;
+			if (backoff.Step())
 				continue;
-			}
 
 			Interlocked.Exchange(ref rbHeader->ReaderWaiting, 1);
 			if (rb.Read(out header, out payload) == OpStatus.Ok)
@@ -475,7 +464,7 @@ public unsafe class Endpoint<TMessageHeader> : IDisposable
 				return false; // Timeout or error
 			}
 
-			i = 0; // Reset spin and reattempt
+			backoff.Reset(); // Reset backoff after kernel wake
 		}
 	}
 
