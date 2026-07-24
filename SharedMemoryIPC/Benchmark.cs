@@ -30,7 +30,7 @@ public unsafe struct BenchmarkPayload
 {
 	public long Timestamp;
 	public uint Sequence;
-	public fixed byte _Padding[4084]; // Padding to make the struct 4KiB
+	public fixed byte _Padding[4068]; // Padding to make the struct 4KiB
 }
 
 /// <summary>
